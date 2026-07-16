@@ -1,0 +1,53 @@
+{
+  "name": "pi-codex-reviewer",
+  "version": "0.1.0",
+  "description": "A fail-closed Codex Guardian-style approval gate for Pi bash execution.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "bash-approval",
+    "guardian",
+    "codex"
+  ],
+  "license": "MIT",
+  "author": "mics8128",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mics8128/pi-codex-reviewer.git"
+  },
+  "homepage": "https://github.com/mics8128/pi-codex-reviewer#readme",
+  "bugs": {
+    "url": "https://github.com/mics8128/pi-codex-reviewer/issues"
+  },
+  "files": [
+    "extensions",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.7",
+    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "@earendil-works/pi-tui": "^0.80.7",
+    "@types/node": "^24.12.0",
+    "typebox": "^1.1.38",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test"
+  }
+}
