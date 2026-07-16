@@ -4,7 +4,7 @@
 
 **A fail-closed, Codex Guardian-style automatic approval gate for Pi.**
 
-Review every agent-issued `bash` action and selected sensitive/out-of-project `write` and `edit` mutations with an isolated reviewer model, while requiring direct user confirmation before blacklisted private-file reads.
+Route configured shell actions, private reads/searches, and sensitive/out-of-project mutations through an isolated reviewer model before execution.
 
 [![npm version](https://img.shields.io/npm/v/pi-approval-guardian.svg)](https://www.npmjs.com/package/pi-approval-guardian)
 [![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions)
@@ -29,12 +29,7 @@ Pi agent tool call
         │
         ├─ ordinary read or in-project source edit ───────► execute normally
         │
-        ├─ blacklisted private read
-        │                │
-        │                ▼
-        │       direct user confirmation ──► allow / block
-        │
-        └─ bash / sensitive write / sensitive edit
+        └─ configured bash / private read or grep / sensitive mutation
                          │
                          ▼
               isolated Guardian reviewer
@@ -70,7 +65,15 @@ Create `~/.pi/agent/approval-guardian.json`:
 {
   "model": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
-  "policy": "Never mutate production unless the user explicitly approves the exact target and side effects."
+  "policy": "Never mutate production unless the user explicitly approves the exact target and side effects.",
+  "review": {
+    "bash.command": "always",
+    "read.path": "private-only",
+    "hypa_read.path": "private-only",
+    "grep.path": "private-only",
+    "write.path": "outside-or-private",
+    "edit.path": "outside-or-private"
+  }
 }
 ```
 
@@ -114,7 +117,8 @@ Guardian · allowed · low risk · auth high
 | Feature | Behavior |
 | --- | --- |
 | All agent `bash` calls | Every Pi agent-issued `bash` tool call is reviewed before execution. Shell commands that read blacklisted private sources require explicit authorization under the reviewer policy. |
-| Private `read`/`hypa_read` calls | Blacklisted project-private files and common external private directories require a direct Pi user-confirmation dialog before any content is read. No UI means fail closed. |
+| Private `read`/`hypa_read` calls | Blacklisted private files/directories are sent to the reviewer, which allows only when the transcript contains explicit user authorization. |
+| Private `grep` calls | `grep.path`, pattern, glob, and scope are reviewed under the same private-path policy. |
 | Sensitive `write` calls | Reviewed when the canonical target is outside the project or matches sensitive-path rules. |
 | Sensitive `edit` calls | Reviewed under the same outside-project and sensitive-path rules. |
 | Ordinary source edits | Normal in-project `write`/`edit` calls bypass the reviewer to avoid unnecessary latency. |
@@ -122,22 +126,24 @@ Guardian · allowed · low risk · auth high
 | Fail closed | Denial, timeout, provider failure, invalid JSON, cancellation, unavailable model/auth, or open circuit blocks the action. |
 | No automatic workaround | A denial tells the agent not to retry through indirect execution or policy circumvention. |
 | Direct user shell excluded | Commands entered directly with Pi `!`/`!!`, another terminal, or another process are not intercepted. |
-| Other tools excluded | Tools other than `bash`, `read`, `hypa_read`, `write`, and `edit` are currently outside this gate. |
+| Other path-based tools | An unconfigured tool with a string `path` parameter defaults to `private-only`; tools without a recognized path remain outside the gate. |
 
-Run `/approval-guardian rules` to display the effective `tool.parameter → review level` matrix. Current levels are direct user confirmation, model review, or off.
+Run `/approval-guardian rules` to display the effective `tool.parameter → reviewer scope` matrix. Supported levels are `always`, `outside-or-private`, `private-only`, and `off`. Every review is performed by the isolated AI reviewer; the extension never displays an approval dialog.
 
 ### Private-read blacklist
 
 The blacklist intentionally targets obvious private sources rather than attempting to be a complete data-loss-prevention system. Matching is based on the canonical path.
 
-| Scope | Examples requiring explicit user confirmation |
+| Scope | Examples requiring explicit authorization verified by the reviewer |
 | --- | --- |
 | Project-private files | `.env`, `.env.*`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `auth.json`, credentials/secrets files, service-account JSON, `*.secret`, `*.secrets`, private-key/certificate formats |
 | Project-private directories | `secrets/`, `credentials/` |
-| External private directories | `.ssh/`, `.gnupg/`, `.aws/`, `.azure/`, `.kube/`, `.docker/`, `.pi/`, macOS `Keychains/` |
-| External authenticated CLI config | `.config/gcloud/`, `.config/gh/`, `.config/glab/` |
+| Linux/Unix private locations | `.ssh/`, `.gnupg/`, `.aws/`, `.azure/`, `.kube/`, `.docker/`, `.password-store/`, keyrings, browser profiles, `/etc/ssl/private/`, WireGuard and NetworkManager secrets |
+| macOS private locations | `~/Library/Keychains/`, browser profiles, 1Password/Bitwarden data, signing and provisioning profiles |
+| Windows private locations | `%USERPROFILE%\\.ssh`, cloud/CLI credentials, browser user-data stores, Credential Manager files, `System32\\config`, and `%PROGRAMDATA%\\ssh` |
+| Authenticated CLI config | `.config/gcloud/`, `.config/gh/`, `.config/glab/`, `.config/op/`, `.config/rclone/` |
 
-Authorization is path-specific and one-shot: allowing one read does not create a permanent session-wide exemption. The confirmation warns that the resulting content will enter the main agent conversation context. The extension does not redact content after an explicitly authorized read.
+Authorization is established from explicit user messages in the transcript. If it is missing, the reviewer denies the action and instructs the agent to explain the exact source and purpose, then wait for the user to authorize it in conversation. The extension does not redact content after an authorized read.
 
 ### Sensitive-mutation detection
 
@@ -422,7 +428,7 @@ If it remains inside the project and does not match a sensitive rule, it execute
 | --- | --- | --- |
 | Runtime | Pi TypeScript extension | Native Codex runtime subsystem |
 | Trigger | Every Pi agent `bash`; blacklisted private `read`/`hypa_read`; selected `write`/`edit` | Approval requests routed by Codex approval policy |
-| Action types | Bash + explicit private-read confirmation + selective file mutations | Shell, exec, execve, apply patch, network, MCP, permission requests |
+| Action types | Bash + reviewer-gated private reads/searches + selective file mutations | Shell, exec, execve, apply patch, network, MCP, permission requests |
 | Sandbox integration | None; approval gate only | Integrated with Codex permission/sandbox architecture |
 | Reviewer tools | Pi `read`, `grep`, `find`, `ls` | Native read-only permission profile |
 | Session reuse | Yes, with Pi branch snapshot/delta | Yes, with native transcript cursor/fork state |
@@ -440,7 +446,7 @@ This project is **Codex Guardian-style**, not an official OpenAI component and n
 | Capability | This plugin | Pi project trust | No guard |
 | --- | ---: | ---: | ---: |
 | Reviews agent shell actions | ✅ | ❌ | ❌ |
-| Requires confirmation for blacklisted private reads | ✅ | ❌ | ❌ |
+| Requires reviewer authorization for blacklisted private reads | ✅ | ❌ | ❌ |
 | Reviews sensitive/outside file mutations | ✅ | ❌ | ❌ |
 | Controls loading project-local Pi resources | ❌ | ✅ | ❌ |
 | Uses an independent risk reviewer | ✅ | ❌ | ❌ |
@@ -451,8 +457,8 @@ Use Pi project trust and this extension together; they solve different problems.
 
 ## Security and privacy model
 
-- Blacklisted direct `read`/`hypa_read` calls are blocked before execution until the user confirms the exact canonical path.
-- An explicitly authorized private read is not redacted; its result enters the main agent conversation like any other tool result.
+- Blacklisted `read`, `hypa_read`, `grep`, and generic path-based calls are reviewed before execution; the reviewer requires explicit authorization in the user transcript.
+- An authorized private read is not redacted; its result enters the main agent conversation like any other tool result.
 - The reviewer provider receives a bounded transcript and planned action.
 - The reviewer can use read-only Pi tools to inspect local files with your user permissions.
 - Tool/file content may contain sensitive data; use a provider you trust.
@@ -469,8 +475,8 @@ Use Pi project trust and this extension together; they solve different problems.
 - Does not intercept direct `!`/`!!` commands, other terminals, or other processes.
 - Does not review ordinary in-project source edits.
 - Does not currently gate MCP, network, deployment, email, browser, subagent, or arbitrary custom tools other than the recognized `hypa_read` path input.
-- Private-read protection is an explicit blacklist, not a complete file-read boundary; renamed secrets, unusual credential stores, alternate tools, and indirect reads may fall outside it.
-- Shell-based private reads depend on the model policy rather than the direct confirmation dialog because shell syntax is not fully parsed.
+- Private-read protection is an explicit cross-platform blacklist, not a complete file-read boundary; renamed secrets, unusual credential stores, pathless tools, and indirect reads may fall outside it.
+- Shell-based private reads depend on reviewer policy because shell syntax is not fully parsed into a canonical target path.
 - Does not enforce an OS sandbox.
 - Reviewer session integration paths are harder to unit-test than pure policy/path logic; use controlled smoke tests after upgrades.
 - Provider availability becomes an availability dependency because the extension intentionally fails closed.

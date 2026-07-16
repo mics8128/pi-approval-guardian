@@ -1,6 +1,6 @@
 {
   "name": "pi-approval-guardian",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A fail-closed approval gate for Pi that reviews agent shell actions and sensitive file mutations with an isolated risk model.",
   "type": "module",
   "keywords": [

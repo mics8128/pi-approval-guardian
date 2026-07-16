@@ -8,16 +8,33 @@ export const POLICY_ENV = "PI_APPROVAL_GUARDIAN_POLICY";
 export const TIMEOUT_ENV = "PI_APPROVAL_GUARDIAN_TIMEOUT_MS";
 export const CONFIG_FILE_NAME = "approval-guardian.json";
 
+export type ReviewLevel =
+	| "always"
+	| "outside-or-private"
+	| "private-only"
+	| "off";
+
+export const DEFAULT_REVIEW_RULES: Readonly<Record<string, ReviewLevel>> = {
+	"bash.command": "always",
+	"read.path": "private-only",
+	"hypa_read.path": "private-only",
+	"grep.path": "private-only",
+	"write.path": "outside-or-private",
+	"edit.path": "outside-or-private",
+};
+
 interface GuardianConfigFile {
 	model?: unknown;
 	timeoutMs?: unknown;
 	policy?: unknown;
+	review?: unknown;
 }
 
 export interface GuardianConfig {
 	model: string;
 	timeoutMs: number;
 	policy?: string;
+	review: Record<string, ReviewLevel>;
 	globalPath: string;
 	projectPath: string;
 	projectConfigLoaded: boolean;
@@ -60,10 +77,17 @@ export function loadGuardianConfig(
 		)
 		.map((value) => value.trim());
 
+	const review = {
+		...DEFAULT_REVIEW_RULES,
+		...parseReviewRules(globalConfig.review, globalPath, warnings),
+		...parseReviewRules(projectConfig.review, projectPath, warnings),
+	};
+
 	return {
 		model,
 		timeoutMs,
 		policy: policies.length > 0 ? policies.join("\n\n") : undefined,
+		review,
 		globalPath,
 		projectPath,
 		projectConfigLoaded: options.projectTrusted && existsSync(projectPath),
@@ -86,6 +110,32 @@ function readConfigFile(path: string, warnings: string[]): GuardianConfigFile {
 		);
 		return {};
 	}
+}
+
+function parseReviewRules(
+	value: unknown,
+	path: string,
+	warnings: string[],
+): Record<string, ReviewLevel> {
+	if (value === undefined) return {};
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		warnings.push(`Ignoring review rules in ${path}: expected an object.`);
+		return {};
+	}
+	const rules: Record<string, ReviewLevel> = {};
+	for (const [key, level] of Object.entries(value)) {
+		if (
+			level === "always" ||
+			level === "outside-or-private" ||
+			level === "private-only" ||
+			level === "off"
+		) {
+			rules[key] = level;
+		} else {
+			warnings.push(`Ignoring review.${key} in ${path}: invalid level.`);
+		}
+	}
+	return rules;
 }
 
 function firstString(...values: unknown[]): string | undefined {

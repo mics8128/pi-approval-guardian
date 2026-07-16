@@ -13,6 +13,7 @@ import {
 	classifyReadPath,
 	requiresExplicitReadAuthorization,
 	shouldReviewMutation,
+	shouldReviewPath,
 } from "../src/gate.ts";
 
 test("opens after three consecutive explicit denials", () => {
@@ -95,18 +96,25 @@ test("requires explicit authorization for project-private reads", () => {
 	}
 });
 
-test("requires explicit authorization for common external private directories", () => {
+test("requires review for common Linux, macOS, and Windows private locations", () => {
 	for (const path of [
-		"/Users/test/.ssh/config",
-		"/Users/test/.gnupg/private-keys-v1.d/key",
-		"/Users/test/.aws/credentials",
-		"/Users/test/.azure/accessTokens.json",
-		"/Users/test/.kube/config",
-		"/Users/test/.docker/config.json",
-		"/Users/test/.pi/agent/auth.json",
-		"/Users/test/.config/gcloud/application_default_credentials.json",
-		"/Users/test/.config/gh/hosts.yml",
+		"/home/test/.ssh/config",
+		"/home/test/.gnupg/private-keys-v1.d/key",
+		"/home/test/.aws/credentials",
+		"/home/test/.azure/accessTokens.json",
+		"/home/test/.kube/config",
+		"/home/test/.docker/config.json",
+		"/home/test/.pi/agent/auth.json",
+		"/home/test/.config/gcloud/application_default_credentials.json",
+		"/home/test/.config/gh/hosts.yml",
+		"/home/test/.password-store/work.gpg",
+		"/etc/ssl/private/server.key",
 		"/Users/test/Library/Keychains/login.keychain-db",
+		"/Users/test/Library/Application Support/Google/Chrome/Default/Login Data",
+		"C:\\Users\\test\\.ssh\\id_ed25519",
+		"C:\\Users\\test\\AppData\\Roaming\\Microsoft\\Credentials\\token",
+		"C:\\Users\\test\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data",
+		"C:\\Windows\\System32\\config\\SAM",
 	]) {
 		const target = classifyReadPath(path, "/repo/project");
 		assert.equal(target.private, true, path);
@@ -119,6 +127,21 @@ test("requires explicit authorization for common external private directories", 
 		),
 		false,
 	);
+});
+
+test("applies configured path review levels", () => {
+	const windowsInside = classifyReadPath(
+		"C:\\repo\\project\\README.md",
+		"C:\\repo\\project",
+	);
+	assert.equal(windowsInside.outsideProject, false);
+	const ordinaryOutside = classifyReadPath("../other/README.md", "/repo/project");
+	const privateInside = classifyReadPath(".env", "/repo/project");
+	assert.equal(shouldReviewPath("always", ordinaryOutside), true);
+	assert.equal(shouldReviewPath("outside-or-private", ordinaryOutside), true);
+	assert.equal(shouldReviewPath("private-only", ordinaryOutside), false);
+	assert.equal(shouldReviewPath("private-only", privateInside), true);
+	assert.equal(shouldReviewPath("off", privateInside), false);
 });
 
 test("reviews sensitive paths inside the project", () => {

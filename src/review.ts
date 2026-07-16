@@ -53,7 +53,7 @@ export type GuardianMessage =
 	| { role: "branchSummary" | "compactionSummary"; summary: string };
 
 export interface GuardianAction {
-	tool: "bash" | "write" | "edit";
+	tool: string;
 	payload: Record<string, unknown>;
 	cwd: string;
 }

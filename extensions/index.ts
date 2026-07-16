@@ -5,11 +5,15 @@ import {
 	type ExtensionContext,
 	type ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
-import { loadGuardianConfig } from "../src/config.ts";
+import {
+	loadGuardianConfig,
+	type ReviewLevel,
+} from "../src/config.ts";
 import {
 	DenialCircuitBreaker,
 	classifyMutationPath,
 	classifyReadPath,
+	shouldReviewPath,
 	type GuardianReviewResult,
 } from "../src/gate.ts";
 import { buildGuardianSystemPrompt } from "../src/policy.ts";
@@ -65,15 +69,15 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		const details =
 			args.trim() === "rules"
 				? [
-						"Review rules (tool.parameter → level):",
-						"bash.command → model review",
-						"read.path → explicit user confirmation for blacklisted private paths; otherwise off",
-						"write.path → model review for sensitive or out-of-project paths; otherwise off",
-						"edit.path → model review for sensitive or out-of-project paths; otherwise off",
-						"All other tools/parameters → off",
+						"Review rules (tool.parameter → reviewer scope):",
+						...Object.entries(config.review)
+							.sort(([left], [right]) => left.localeCompare(right))
+							.map(([key, level]) => `${key} → ${level}`),
+						"Unconfigured tools with a string path parameter default to private-only.",
+						"All review prompts go to the isolated AI reviewer; no user confirmation dialog is used.",
 					]
 				: [
-						"Reviews every agent bash action, blacklisted private reads, and sensitive/out-of-project writes or edits before execution.",
+						"Reviews configured shell, private-read/search, and sensitive/out-of-project mutation actions before execution.",
 						"Run /approval-guardian rules for the tool/parameter review matrix.",
 					];
 		ctx.ui.notify(
@@ -104,40 +108,11 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		const readPath = readPathFromToolCall(event);
-		if (readPath) {
-			const target = classifyReadPath(readPath, ctx.cwd);
-			if (target.private) {
-				if (!ctx.hasUI) {
-					return {
-						block: true,
-						reason: `Reading private path ${target.absolutePath} requires explicit user confirmation, but no interactive approval UI is available.`,
-					};
-				}
-				const approved = await ctx.ui.confirm(
-					"Approval Guardian · private read",
-					[
-						`Allow the agent to read this path?`,
-						target.absolutePath,
-						`Reason: ${target.reasons.join(", ")}`,
-						"The file contents will enter the agent conversation context.",
-					].join("\n"),
-				);
-				if (!approved) {
-					return {
-						block: true,
-						reason: `User did not explicitly authorize reading private path ${target.absolutePath}.`,
-					};
-				}
-				ctx.ui.notify(
-					`Approval Guardian · explicitly allowed private read\n${target.absolutePath}`,
-					"warning",
-				);
-				return;
-			}
-		}
-
-		const action = actionFromToolCall(event, ctx.cwd);
+		const config = loadGuardianConfig({
+			cwd: ctx.cwd,
+			projectTrusted: ctx.isProjectTrusted(),
+		});
+		const action = actionFromToolCall(event, ctx.cwd, config.review);
 		if (!action) return;
 
 		if (circuitBreaker.isOpen()) {
@@ -149,7 +124,8 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			return { block: true, reason: rejectionReason(result) };
 		}
 
-		const result = await reviewAction(action, ctx);
+		const reviewed = await reviewAction(action, ctx);
+		const result = enforceActionRequirements(action, reviewed);
 		if (result.kind === "allowed") {
 			circuitBreaker.record(false);
 			ctx.ui.notify(formatReviewResult(result, action), "info");
@@ -241,23 +217,38 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	}
 }
 
-function readPathFromToolCall(event: ToolCallEvent): string | undefined {
-	if (isToolCallEventType("read", event)) return event.input.path;
-	if (event.toolName !== "hypa_read") return;
-	const input = event.input as { path?: unknown };
-	return typeof input.path === "string" ? input.path : undefined;
-}
-
-function actionFromToolCall(
+export function actionFromToolCall(
 	event: ToolCallEvent,
 	cwd: string,
+	rules: Record<string, ReviewLevel>,
 ): GuardianAction | undefined {
 	if (isToolCallEventType("bash", event)) {
+		if ((rules["bash.command"] ?? "always") === "off") return;
 		return { tool: "bash", payload: { command: event.input.command }, cwd };
+	}
+	if (isToolCallEventType("read", event)) {
+		return pathReadAction("read", event.input, cwd, rules["read.path"]);
+	}
+	if (isToolCallEventType("grep", event)) {
+		return pathReadAction(
+			"grep",
+			{ ...event.input, path: event.input.path || "." },
+			cwd,
+			rules["grep.path"],
+		);
+	}
+	if (event.toolName === "hypa_read") {
+		return pathReadAction(
+			"hypa_read",
+			event.input as Record<string, unknown>,
+			cwd,
+			rules["hypa_read.path"],
+		);
 	}
 	if (isToolCallEventType("write", event)) {
 		const target = classifyMutationPath(event.input.path, cwd);
-		if (!target.outsideProject && !target.sensitive) return;
+		const level = rules["write.path"] ?? "outside-or-private";
+		if (!shouldReviewMutationTarget(level, target)) return;
 		return {
 			tool: "write",
 			payload: {
@@ -270,7 +261,8 @@ function actionFromToolCall(
 	}
 	if (isToolCallEventType("edit", event)) {
 		const target = classifyMutationPath(event.input.path, cwd);
-		if (!target.outsideProject && !target.sensitive) return;
+		const level = rules["edit.path"] ?? "outside-or-private";
+		if (!shouldReviewMutationTarget(level, target)) return;
 		return {
 			tool: "edit",
 			payload: {
@@ -281,7 +273,78 @@ function actionFromToolCall(
 			cwd,
 		};
 	}
-	return;
+	return pathReadAction(
+		event.toolName,
+		event.input as Record<string, unknown>,
+		cwd,
+		rules[`${event.toolName}.path`] ?? "private-only",
+	);
+}
+
+function pathReadAction(
+	tool: string,
+	input: Record<string, unknown>,
+	cwd: string,
+	level: ReviewLevel = "private-only",
+): GuardianAction | undefined {
+	const path = input.path;
+	if (typeof path !== "string") return;
+	const target = classifyReadPath(path, cwd);
+	const privateSelector =
+		tool === "grep" &&
+		typeof input.glob === "string" &&
+		looksLikePrivateGlob(input.glob);
+	if (!shouldReviewPath(level, target) && !privateSelector) return;
+	return {
+		tool,
+		payload: {
+			...input,
+			path: target.absolutePath,
+			review_reasons: target.reasons,
+			review_level: level,
+			private_data_read: target.private || privateSelector,
+		},
+		cwd,
+	};
+}
+
+function looksLikePrivateGlob(glob: string): boolean {
+	return /(?:^|[\\/])(?:\.env(?:[.*]|$)|secrets?(?:[\\/.*]|$)|credentials?(?:[\\/.*]|$)|\.ssh(?:[\\/]|$)|\.gnupg(?:[\\/]|$)|\.aws(?:[\\/]|$)|\.kube(?:[\\/]|$)|[^/\\]*\.(?:pem|key|p12|pfx|tfvars)(?:$|[},]))/i.test(
+		glob,
+	);
+}
+
+function shouldReviewMutationTarget(
+	level: ReviewLevel,
+	target: ReturnType<typeof classifyMutationPath>,
+): boolean {
+	if (level === "always") return true;
+	if (level === "outside-or-private")
+		return target.outsideProject || target.sensitive;
+	if (level === "private-only") return target.sensitive;
+	return false;
+}
+
+export function enforceActionRequirements(
+	action: GuardianAction,
+	result: GuardianReviewResult,
+): GuardianReviewResult {
+	if (
+		result.kind !== "allowed" ||
+		action.payload.private_data_read !== true ||
+		result.assessment.user_authorization === "high"
+	) {
+		return result;
+	}
+	return {
+		kind: "denied",
+		assessment: {
+			...result.assessment,
+			outcome: "deny",
+			rationale:
+				"The private-data read lacks explicit high user authorization. Explain the exact source and purpose, then wait for the user to authorize it in conversation before retrying.",
+		},
+	};
 }
 
 function collectBranchMessages(ctx: ExtensionContext): GuardianMessage[] {

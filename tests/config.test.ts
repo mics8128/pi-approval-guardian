@@ -17,6 +17,7 @@ test("loads global and trusted project config with documented precedence", () =>
 			model: "global/reviewer",
 			timeoutMs: 60_000,
 			policy: "global policy",
+			review: { "grep.path": "outside-or-private", "read.path": "off" },
 		}),
 	);
 	writeFileSync(
@@ -24,6 +25,7 @@ test("loads global and trusted project config with documented precedence", () =>
 		JSON.stringify({
 			model: "project/reviewer",
 			policy: "project policy",
+			review: { "read.path": "private-only" },
 		}),
 	);
 
@@ -36,6 +38,9 @@ test("loads global and trusted project config with documented precedence", () =>
 	assert.equal(config.model, "env/reviewer");
 	assert.equal(config.timeoutMs, 60_000);
 	assert.equal(config.policy, "global policy\n\nproject policy");
+	assert.equal(config.review["bash.command"], "always");
+	assert.equal(config.review["read.path"], "private-only");
+	assert.equal(config.review["grep.path"], "outside-or-private");
 	assert.equal(config.projectConfigLoaded, true);
 });
 
@@ -61,5 +66,7 @@ test("does not load project config for an untrusted project", () => {
 	});
 	assert.equal(config.model, "openai-codex/codex-auto-review");
 	assert.equal(config.policy, undefined);
+	assert.equal(config.review["read.path"], "private-only");
+	assert.equal(config.review["write.path"], "outside-or-private");
 	assert.equal(config.projectConfigLoaded, false);
 });

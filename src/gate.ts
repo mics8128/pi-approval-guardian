@@ -7,7 +7,9 @@ import {
 	relative,
 	resolve,
 	sep,
+	win32,
 } from "node:path";
+import type { ReviewLevel } from "./config.ts";
 import type { GuardianAssessment } from "./review.ts";
 
 export const GUARDIAN_REVIEW_MAX_ATTEMPTS = 3;
@@ -99,6 +101,12 @@ const PRIVATE_READ_BASENAMES = new Set([
 	".pypirc",
 	".git-credentials",
 	"auth.json",
+	"token.json",
+	"tokens.json",
+	"cookies.sqlite",
+	"login data",
+	"logins.json",
+	"key4.db",
 	"credentials",
 	"credentials.json",
 	"secrets.json",
@@ -109,7 +117,12 @@ const PRIVATE_READ_BASENAMES = new Set([
 	"id_dsa",
 ]);
 
-const PROJECT_PRIVATE_SEGMENTS = new Set(["secrets", "credentials"]);
+const PROJECT_PRIVATE_SEGMENTS = new Set([
+	"secrets",
+	"secret",
+	"credentials",
+	"private",
+]);
 const EXTERNAL_PRIVATE_SEGMENTS = new Set([
 	".ssh",
 	".gnupg",
@@ -118,9 +131,52 @@ const EXTERNAL_PRIVATE_SEGMENTS = new Set([
 	".kube",
 	".docker",
 	".pi",
+	".password-store",
+	".mozilla",
 	"keychains",
+	"keyrings",
+	"credentials",
+	"vault",
+	"vaults",
+	"1password",
+	"bitwarden",
+	"keepass",
+	"keepassxc",
+	"wireguard",
 ]);
-const EXTERNAL_PRIVATE_CONFIG_SEGMENTS = new Set(["gcloud", "gh", "glab"]);
+const EXTERNAL_PRIVATE_CONFIG_SEGMENTS = new Set([
+	"gcloud",
+	"gh",
+	"glab",
+	"op",
+	"rclone",
+]);
+const PRIVATE_PATH_FRAGMENTS = [
+	"/library/application support/google/chrome/",
+	"/library/application support/chromium/",
+	"/library/application support/firefox/",
+	"/library/application support/bravesoftware/",
+	"/library/application support/1password/",
+	"/library/application support/bitwarden/",
+	"/library/keychains/",
+	"/library/mobiledevice/provisioning profiles/",
+	"/appdata/roaming/gnupg/",
+	"/appdata/roaming/gcloud/",
+	"/appdata/roaming/github cli/",
+	"/appdata/roaming/1password/",
+	"/appdata/roaming/bitwarden/",
+	"/appdata/roaming/mozilla/firefox/profiles/",
+	"/appdata/roaming/microsoft/credentials/",
+	"/appdata/local/microsoft/credentials/",
+	"/appdata/local/google/chrome/user data/",
+	"/appdata/local/chromium/user data/",
+	"/appdata/local/microsoft/edge/user data/",
+	"/windows/system32/config/",
+	"/programdata/ssh/",
+	"/etc/ssl/private/",
+	"/etc/networkmanager/system-connections/",
+	"/etc/wireguard/",
+];
 const PRIVATE_READ_SUFFIXES = [".pem", ".key", ".p12", ".pfx", ".tfvars"];
 
 export interface MutationReviewTarget {
@@ -171,48 +227,74 @@ export function shouldReviewMutation(path: string, cwd: string): boolean {
 // The branches deliberately mirror independent blacklist categories for auditability.
 // pi-lens-ignore: high-complexity
 export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
-	const absolutePath = canonicalizePath(resolve(cwd, path));
-	const projectRoot = canonicalizePath(resolve(cwd));
-	const rel = relative(projectRoot, absolutePath);
-	const outsideProject =
-		rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-	const segments = absolutePath.split(/[\\/]+/).filter(Boolean);
-	const normalizedSegments = segments.map((segment) => segment.toLowerCase());
-	const file = basename(absolutePath).toLowerCase();
+	const windowsAbsolute = /^[a-z]:[\\/]/i.test(path) || /^\\\\/.test(path);
+	const windowsCwd = /^[a-z]:[\\/]/i.test(cwd) || /^\\\\/.test(cwd);
+	const absolutePath = windowsAbsolute
+		? win32.normalize(path).replace(/\\/g, "/")
+		: canonicalizePath(resolve(cwd, path));
+	const projectRoot = windowsCwd
+		? win32.normalize(cwd).replace(/\\/g, "/")
+		: canonicalizePath(resolve(cwd));
+	let rel: string;
+	if (windowsAbsolute && windowsCwd) {
+		rel = win32.relative(projectRoot, absolutePath);
+	} else if (windowsAbsolute) {
+		rel = "..";
+	} else {
+		rel = relative(projectRoot, absolutePath);
+	}
+	const outsideProject = windowsAbsolute
+		? rel === ".." || rel.startsWith("../") || win32.isAbsolute(rel)
+		: rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+	const normalizedSegments = absolutePath
+		.split(/[\\/]+/)
+		.filter(Boolean)
+		.map((segment) => segment.toLowerCase());
+	const file = normalizedSegments.at(-1) ?? "";
 	const privateBasename =
 		PRIVATE_READ_BASENAMES.has(file) ||
 		file.startsWith(".env.") ||
 		file.startsWith("service-account") ||
+		file.startsWith("password") ||
 		file.endsWith(".secret") ||
 		file.endsWith(".secrets") ||
 		PRIVATE_READ_SUFFIXES.some((suffix) => file.endsWith(suffix));
 	const projectPrivateSegment = normalizedSegments.some((segment) =>
 		PROJECT_PRIVATE_SEGMENTS.has(segment),
 	);
-	const externalPrivateSegment =
-		outsideProject &&
-		(normalizedSegments.some((segment) =>
+	const privateDirectory =
+		normalizedSegments.some((segment) =>
 			EXTERNAL_PRIVATE_SEGMENTS.has(segment),
 		) ||
-			normalizedSegments.some(
-				(segment, index) =>
-					segment === ".config" &&
-					EXTERNAL_PRIVATE_CONFIG_SEGMENTS.has(
-						normalizedSegments[index + 1] ?? "",
-					),
-			));
+		normalizedSegments.some(
+			(segment, index) =>
+				segment === ".config" &&
+				EXTERNAL_PRIVATE_CONFIG_SEGMENTS.has(
+					normalizedSegments[index + 1] ?? "",
+				),
+		) ||
+		PRIVATE_PATH_FRAGMENTS.some((fragment) =>
+			`/${normalizedSegments.join("/")}/`.includes(fragment),
+		);
 	const privatePath =
-		privateBasename ||
-		(!outsideProject && projectPrivateSegment) ||
-		externalPrivateSegment;
+		privateBasename || projectPrivateSegment || privateDirectory;
 	const reasons = [
 		...(privateBasename ? ["private file"] : []),
-		...(!outsideProject && projectPrivateSegment
-			? ["project private directory"]
-			: []),
-		...(externalPrivateSegment ? ["external private directory"] : []),
+		...(projectPrivateSegment ? ["private directory"] : []),
+		...(privateDirectory ? ["common private directory"] : []),
 	];
 	return { absolutePath, outsideProject, private: privatePath, reasons };
+}
+
+export function shouldReviewPath(
+	level: ReviewLevel,
+	target: ReadReviewTarget,
+): boolean {
+	if (level === "always") return true;
+	if (level === "outside-or-private")
+		return target.outsideProject || target.private;
+	if (level === "private-only") return target.private;
+	return false;
 }
 
 export function requiresExplicitReadAuthorization(
