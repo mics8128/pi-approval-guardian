@@ -1,233 +1,194 @@
-<div align="center">
-
 # pi-approval-guardian
 
-**Una puerta de aprobación automática fail-closed, inspirada en Codex Guardian, para Pi.**
+**Revisión automática fail-closed para llamadas de herramientas de Pi.**
 
-Revisa todo `bash` del agente, lecturas/búsquedas privadas y operaciones `write`/`edit` fuera del proyecto o sobre rutas privadas antes de ejecutarlas.
+Antes de ejecutar comandos shell, leer datos privados o modificar archivos sensibles/fuera del proyecto, un modelo reviewer aislado evalúa la acción.
 
 [![npm version](https://img.shields.io/npm/v/pi-approval-guardian.svg)](https://www.npmjs.com/package/pi-approval-guardian)
-[![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions)
+[![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Pi package](https://img.shields.io/badge/Pi-package-6c5ce7)](https://pi.dev/packages/pi-approval-guardian)
 
 [English](README.md) · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · **Español**
 
-</div>
-
 > [!IMPORTANT]
-> Las extensiones de Pi se ejecutan con tus permisos de usuario. Revisa el código antes de instalar. Este paquete es una puerta de aprobación, no un sandbox del sistema operativo.
+> Las extensiones de Pi se ejecutan con los permisos del usuario actual. Revisa el código antes de instalar. Este paquete es un approval gate, no un sandbox del sistema operativo.
 
-## Inicio rápido
+## Instalación
 
 ```bash
 pi install npm:pi-approval-guardian
 ```
 
-Crea `~/.pi/agent/approval-guardian.json`:
+El reviewer por defecto es `openai-codex/codex-auto-review`, con un deadline compartido de 90 segundos. Si el provider oficial de Codex no está autenticado:
+
+```text
+/login openai-codex
+/reload
+/approval-guardian
+```
+
+La configuración por defecto no requiere archivo adicional.
+
+## Protección por defecto
+
+| Tool/action | Scope por defecto |
+| --- | --- |
+| `bash.command` | Siempre se revisa |
+| `grep.path` | Siempre, incluso búsquedas amplias o sin path |
+| `read.path` | Datos privados conocidos |
+| `find.path` / `ls.path` | Paths privados conocidos |
+| `write.path` / `edit.path` | Fuera del proyecto o en paths privados/sensibles |
+| Otras tools con `path` string | `private-only` por defecto |
+
+Las ediciones normales dentro del proyecto se ejecutan sin latencia del reviewer. Los comandos directos `!`/`!!`, otros terminales y otros procesos no se interceptan.
+
+## Funcionamiento
+
+```text
+Pi agent tool call
+        │
+        ├─ acción normal ───────────────────────────► ejecutar
+        │
+        └─ acción protegida
+               │
+               ▼
+        Guardian reviewer aislado
+        normal: read · grep · find · ls
+        private-data: sin tools
+               │
+          ┌────┴────┐
+          ▼         ▼
+        allow     otro resultado
+        ejecutar   bloquear
+```
+
+Solo un `outcome: "allow"` válido permite ejecutar. Deny, timeout, output inválido, errores de auth/model/provider, cancelación y circuit open bloquean fail-closed.
+
+El acceso a datos privados también exige autorización explícita en el transcript del usuario y `user_authorization: "high"` del reviewer.
+
+## Reglas de datos privados
+
+Se protegen, entre otros:
+
+- `.env`, `.npmrc`, `.netrc`, `.pypirc`, credenciales Git, service accounts y directorios de credentials/secrets;
+- claves SSH/GPG y autenticación de cloud CLI, Kubernetes y Docker;
+- login stores del navegador, password managers, keychains/keyrings, VPN, certificados privados y credenciales de Terraform;
+- ubicaciones comunes de credenciales en Linux, macOS y Windows;
+- auth, settings/model/Guardian/trust, API keys, historial de runs/sessions/delegates, memory, bases de datos de context/session e índices de búsqueda de Pi.
+
+No se considera privado todo `.pi/`. El código y la documentación de skills instalados bajo `.pi/agent/npm/node_modules/`, y el source de skills/agents/extensions del usuario, no requieren autorización privada únicamente por su ubicación. Un archivo individual aún puede coincidir con otra regla.
+
+Read y mutation se clasifican por separado. Project `.pi/skills`, `.pi/agents`, `.pi/extensions`, prompts, themes, chains y package settings siguen siendo sensitive mutation surfaces porque pueden cambiar el comportamiento de Pi; se revisan al modificarlos, pero no son confidenciales solo por leerlos.
+
+Se comprueban canonical paths y targets de symlinks.
+
+## Comportamiento del reviewer
+
+- Model e in-memory session separados de la conversación principal.
+- Reviews normales: solo `read`, `grep`, `find`, `ls`.
+- Reviews de autorización privada: sin tools.
+- Nunca recibe `bash`, `write` ni `edit`.
+- Transcript, archivos, tool output y planned action se tratan como evidencia no confiable.
+- Hasta 3 attempts para assessments inválidos y ciertos errores transitorios dentro de un deadline compartido.
+
+Tres batches consecutivos con denial, o diez entre los últimos cincuenta, abren el circuito. Las sibling tool calls de un mismo assistant message forman un solo batch, por lo que varias denegaciones simultáneas cuentan una vez.
+
+## Configuración opcional
+
+Global: `~/.pi/agent/approval-guardian.json`
+
+Trusted project: `<project>/.pi/approval-guardian.json`
 
 ```json
 {
   "model": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
-  "policy": "No modificar producción sin aprobación explícita."
+  "policy": "No modificar producción sin autorización exacta."
 }
 ```
 
-Reinicia Pi o ejecuta `/reload`, y comprueba el estado con `/approval-guardian`.
+También se admiten custom reviewer channels ya registrados y autenticados en el model registry de Pi.
 
-## Cómo funciona
+Review matrix por defecto:
+
+```json
+{
+  "review": {
+    "bash.command": "always",
+    "grep.path": "always",
+    "read.path": "private-only",
+    "find.path": "private-only",
+    "ls.path": "private-only",
+    "write.path": "outside-or-private",
+    "edit.path": "outside-or-private"
+  }
+}
+```
+
+Niveles: `always`, `outside-or-private`, `private-only`, `off`.
+
+Un trusted project solo puede reforzar la protección global:
 
 ```text
-Pi agent tool call
-  ├─ edición o lectura normal ───────────────► ejecución normal
-  └─ bash / read o grep privado / mutación sensible
-                  ▼
-       reviewer Guardian aislado
-       normal: solo read · grep · find · ls; datos privados: sin tools
-                  ▼
-       solo un allow explícito se ejecuta
+off < private-only < outside-or-private < always
 ```
 
-Solo un `{"outcome":"allow"}` válido permite la ejecución. Denegación, timeout, fallo del proveedor, JSON inválido, cancelación, model/auth no disponible o circuit open bloquean la acción.
+Variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_TIMEOUT_MS`, `PI_APPROVAL_GUARDIAN_POLICY`.
 
-## Lista completa de funciones
+Precedencia de model/timeout: `environment > trusted project > global > built-in default`. La policy combina configuración global, trusted project y environment.
 
-### Intercepción
+Usa `/approval-guardian rules` para ver las reglas efectivas.
 
-| Función | Comportamiento |
-| --- | --- |
-| Todo `bash` del agente | Se revisa antes de ejecutarse. |
-| `read`/`hypa_read` privado | Solo se permite con autorización explícita high en la conversación. |
-| `grep` | Siempre se revisan path, glob y alcance de búsqueda. |
-| Tool path no configurada | Un parámetro `path` string usa `private-only` por defecto. |
-| `write` sensible | Se revisa si el destino canónico está fuera del proyecto o coincide con una regla sensible. |
-| `edit` sensible | Usa las mismas reglas de límite y sensibilidad. |
-| Edición normal de código | Una edición no sensible dentro del proyecto evita la latencia del reviewer. |
-| Shell directo excluido | `!`/`!!`, otros terminales y procesos no se interceptan. |
-| Solo reviewer | Toda aprobación la decide el reviewer AI aislado; no aparece diálogo de confirmación. |
-
-### Rutas sensibles
-
-Se revisan rutas fuera del proyecto y categorías como:
-
-- `.env`, credentials y secrets;
-- `.ssh/`, `.gnupg/`, `.aws/`, `.kube/`, claves y certificados;
-- `.zshrc`, `.bashrc`, `.profile` y persistencia del shell;
-- `.git/`, hooks/config, `.github/`, GitLab CI;
-- `.pi/`, settings y configuración Guardian;
-- `package.json` y lockfiles npm/pnpm/Yarn;
-- Terraform, Kubernetes y Docker Compose.
-
-El clasificador resuelve symlinks de directorios existentes y symlinks de archivo colgantes para detectar escrituras fuera del proyecto. Una ruta sensible no se deniega automáticamente: requiere revisión.
-
-### Aislamiento del reviewer
-
-- Modelo separado del modelo de la conversación principal;
-- sesión Pi aislada en memoria;
-- revisiones normales: solo `read`, `grep`, `find`, `ls`; revisiones privadas: sin tools;
-- sin `bash`, `write` ni `edit`;
-- sin extensions, skills, prompt templates, themes ni project context files;
-- thinking level `low`;
-- investigación read-only de scripts, package scripts, destinos, configuración y metadata del repositorio;
-- transcript, tool output, archivos, retry reason y acción tratados como evidencia no confiable.
-
-La lista de tools no es un OS sandbox. El reviewer puede leer archivos accesibles para el usuario actual.
-
-### Policy y prompt
-
-Sincroniza conceptos del commit de OpenAI Codex Guardian [`03bb3b12367397e14a8facc2e018d645ff4d8e83`](https://github.com/openai/codex/tree/03bb3b12367397e14a8facc2e018d645ff4d8e83/codex-rs/core/src/guardian):
-
-- separación transcript/action y protección contra prompt injection;
-- risk: `low`, `medium`, `high`, `critical`;
-- authorization: `unknown`, `low`, `medium`, `high`;
-- low/medium normalmente permitidos;
-- high solo con autorización suficiente, alcance limitado y sin absolute deny;
-- critical denegado;
-- exfiltración de secrets/private data a destinos no confiables denegada incluso con high authorization;
-- reglas de credential probing, persistent security weakening, acciones destructivas, Git, borrado limitado y re-aprobación informada;
-- organization policy adicional;
-- respuesta JSON estricta.
-
-### Límites de contexto
-
-| Elemento | Límite |
-| --- | ---: |
-| Message transcript | 40.000 caracteres |
-| Tool transcript | 40.000 caracteres |
-| Una message | 8.000 caracteres |
-| Una tool entry | 4.000 caracteres |
-| Planned action | 64.000 caracteres |
-| Recent non-user entries | 40 |
-
-Se priorizan la primera/última intención del usuario y la evidencia reciente. El contenido largo se trunca por el centro con marcadores explícitos.
-
-### Reutilización de sesión y delta
-
-- La primera revisión envía el transcript completo acotado;
-- tras una revisión válida se reutiliza la sesión y solo se envía el delta;
-- las llamadas se serializan;
-- cambios de branch, cwd, model, timeout o policy reconstruyen la sesión;
-- un retry usa una sesión nueva y transcript completo;
-- reload/shutdown limpia y cancela la revisión activa.
-
-### Retry y deadline
-
-| Función | Valor |
-| --- | ---: |
-| Máximo de attempts | 3 |
-| Backoff inicial | 200 ms |
-| Factor | 2× |
-| Jitter | 0,9–1,1× |
-| Deadline compartido por defecto | 90 segundos |
-| Rango configurable | 1–300 segundos |
-
-Se reintenta JSON de assessment inválido y errores transitorios clasificados por Pi: overload, rate limit, HTTP 5xx, fallos fetch/transport/stream. Quota/billing exhaustion no se reintenta. Startup, attempts, prompt y waits comparten un único deadline.
-
-### Clasificación de resultados
-
-- `allowed`: ejecutar;
-- `denied`: bloquear y prohibir workaround;
-- `timeout`: bloquear;
-- `failure`: bloquear;
-- `cancelled`: bloquear;
-- `circuit-open`: bloquear sin llamar al reviewer.
-
-### Circuit breaker
-
-En una ejecución del agente Pi, 3 denegaciones explícitas consecutivas o 10 denegaciones entre las últimas 50 reviews abren el circuito. La ejecución se aborta y las acciones protegidas posteriores se bloquean inmediatamente.
-
-### UI compacta
-
-Muestra estados cortos: `reviewing`, `allowed`, `blocked`, `timed out`, `review failed`, `cancelled` y `circuit open`.
-
-## Configuración
-
-Global: `~/.pi/agent/approval-guardian.json`
-
-Proyecto: `<project>/.pi/approval-guardian.json` (solo si el proyecto es trusted)
-
-Variables:
+## Actualizar y eliminar
 
 ```bash
-PI_APPROVAL_GUARDIAN_MODEL
-PI_APPROVAL_GUARDIAN_TIMEOUT_MS
-PI_APPROVAL_GUARDIAN_POLICY
+pi update npm:pi-approval-guardian
 ```
 
-Model/timeout: `environment > trusted project > global > default`
-
-Policy: `default + global + trusted project + environment`
-
-Review rules usan un floor monotónico: el proyecto trusted solo puede reforzar la protección global (`off < private-only < outside-or-private < always`).
-
-## Instalación y actualización
+Después ejecuta `/reload`.
 
 ```bash
-pi install npm:pi-approval-guardian
-pi install npm:pi-approval-guardian@0.5.0
-pi update --extensions
 pi remove npm:pi-approval-guardian
 ```
 
-Git:
+Instalación local al proyecto:
 
 ```bash
-pi install git:github.com/mics8128/pi-approval-guardian@v0.5.0
+pi install -l npm:pi-approval-guardian
 ```
 
-## Comparación con Codex Guardian
+Un npm spec con versión queda fijado. Para mover el pin, instala una nueva versión explícita.
 
-| Capacidad | pi-approval-guardian | Codex Guardian |
-| --- | --- | --- |
-| Runtime | Extensión TypeScript para Pi | Subsistema nativo de Codex |
-| Trigger | Todo bash + read/search privado + write/edit selectivos | Codex approval policy |
-| Actions | Bash + acceso privado + archivos sensibles | Shell/exec/patch/network/MCP/permissions |
-| Sandbox | No; solo approval gate | Integrado con permissions/sandbox |
-| Session delta | Sí | Sí |
-| Retry | Parse/provider transitorio, máx. 3 | Parse/session seleccionados, máx. 3 |
-| Structured output | Prompt + parser | JSON Schema + parser |
-| Analytics | No | Eventos/analytics nativos |
+## Limitaciones de seguridad
 
-Este proyecto es **Codex Guardian-style**; no es un componente oficial de OpenAI ni idéntico a Codex.
+- Las acciones aprobadas usan los permisos normales del usuario de Pi.
+- Las decisiones del reviewer son probabilísticas.
+- El provider recibe un transcript acotado y metadata de la acción.
+- Una lectura privada autorizada no se redacta en la conversación principal.
+- Las reglas de paths son heurísticas y no detectan todos los secrets renombrados o indirectos.
+- El shell no se analiza como un AST completo.
+- El estado del filesystem puede cambiar entre review y ejecución.
+- Pathless custom tools, MCP, network, browser, email, deployment y subagent actions no quedan cubiertas automáticamente.
+- Si reviewer/provider no está disponible, las acciones protegidas se bloquean.
 
-## Seguridad, privacidad y límites
+Referencia técnica completa: [docs/REFERENCE.md](docs/REFERENCE.md)
 
-El proveedor reviewer recibe transcript/action acotados y puede leer archivos locales mediante tools read-only con permisos del usuario. Usa un proveedor confiable. El paquete no añade telemetry propia. Los comandos permitidos se ejecutan con los privilegios normales de Pi. La lista sensible es heurística, no un DLP completo. Las decisiones LLM son probabilísticas.
+## Desarrollo
 
-No se cubren `!`/`!!`, otros terminales, MCP, network, deployment, email, browser, subagent ni arbitrary custom tools.
-
-## Desarrollo y publicación
-
-Node.js 22.19+:
+Requiere Node.js 22.19 o superior.
 
 ```bash
 npm install
 npm run check
 npm run package:check
+pi -e .
 ```
 
-Para publicar en npm, consulta [docs/PUBLISHING.md](docs/PUBLISHING.md). El repositorio incluye un workflow de GitHub Actions para trusted publishing/OIDC.
+Guía de publicación: [docs/PUBLISHING.md](docs/PUBLISHING.md)
 
-## Licencias y avisos de terceros
+## Licencia y atribución
 
-El código original del proyecto usa la [licencia MIT](LICENSE). `src/policy.ts` contiene materiales modificados y adaptados de OpenAI Codex Guardian; esas partes siguen sujetas a la [licencia Apache 2.0](LICENSES/Apache-2.0.txt). Consulta [NOTICE](NOTICE) para la atribución y los cambios. Este proyecto no está afiliado ni respaldado por OpenAI.
+El código original usa [MIT License](LICENSE). El material adaptado de OpenAI Codex Guardian policy/prompt permanece bajo [Apache License 2.0](LICENSES/Apache-2.0.txt). Consulta [NOTICE](NOTICE).
+
+Este proyecto está inspirado en Guardian y no está afiliado ni respaldado por OpenAI.

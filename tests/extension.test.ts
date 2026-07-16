@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
@@ -8,8 +8,10 @@ import {
 	actionFromToolCall,
 	enforceActionRequirements,
 	reviewerToolsForAction,
+	toolCallBatchInfo,
 } from "../extensions/index.ts";
 import { DEFAULT_REVIEW_RULES } from "../src/config.ts";
+import { DenialCircuitBreaker, ReviewBatchTracker } from "../src/gate.ts";
 
 function event(toolName: string, input: Record<string, unknown>): ToolCallEvent {
 	return { toolName, input, toolCallId: "test" } as unknown as ToolCallEvent;
@@ -96,6 +98,128 @@ test("marks obvious shell private-data access for high authorization", () => {
 		);
 		assert.equal(action?.payload.private_data_read, true, command);
 	}
+});
+
+test("does not route installed Pi package docs through private-read review", () => {
+	const packageSkill = actionFromToolCall(
+		event("read", {
+			path: join(
+				homedir(),
+				".pi/agent/npm/node_modules/@upstash/context7-pi/skills/context7-docs/SKILL.md",
+			),
+		}),
+		"/repo/project",
+		{ ...DEFAULT_REVIEW_RULES },
+	);
+	assert.equal(packageSkill, undefined);
+
+	const settings = actionFromToolCall(
+		event("read", { path: "/home/test/.pi/agent/settings.json" }),
+		"/repo/project",
+		{ ...DEFAULT_REVIEW_RULES },
+	);
+	assert.equal(settings?.payload.private_data_read, true);
+});
+
+test("only marks known confidential Pi paths as private shell access", () => {
+	for (const command of [
+		"cat ~/.pi/agent/auth.json",
+		"cat $HOME/.pi/agent/settings.json",
+		"cat ~/.pi/agent/sessions/project/session.jsonl",
+		"cat ~/.pi/memory/memory.db",
+		"cat ~/.pi/agent/*",
+		"cat ~/.pi/agent/{auth.json,settings.json}",
+		"cat ~/.pi/agent/auth.*",
+		'P=$HOME/.pi; A=auth; cat "$P/agent/$A.json"',
+	]) {
+		const action = actionFromToolCall(
+			event("bash", { command }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, true, command);
+	}
+
+	for (const command of [
+		"cat ~/.pi/agent/npm/node_modules/@upstash/context7-pi/skills/context7-docs/SKILL.md",
+		"cat ~/.pi/agent/skills/custom/SKILL.md",
+		"cat ~/.pi/agent/extensions/example/index.ts",
+	]) {
+		const action = actionFromToolCall(
+			event("bash", { command }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, false, command);
+	}
+});
+
+test("reviews broad find and ls scopes that contain private descendants", () => {
+	const project = mkdtempSync(join(tmpdir(), "guardian-list-"));
+	writeFileSync(join(project, ".env"), "TOKEN=test");
+	for (const [toolName, input] of [
+		["find", { path: project, pattern: "*" }],
+		["ls", { path: project }],
+	] as const) {
+		const action = actionFromToolCall(
+			event(toolName, input),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, true, toolName);
+	}
+});
+
+test("groups sibling tool calls from one assistant message", () => {
+	const branch = [
+		{
+			type: "message",
+			id: "assistant-batch",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "call-1" },
+					{ type: "toolCall", id: "call-2" },
+					{ type: "toolCall", id: "call-3" },
+				],
+			},
+		},
+	];
+	assert.deepEqual(toolCallBatchInfo("call-1", branch), {
+		id: "assistant-batch",
+		isLast: false,
+	});
+	assert.deepEqual(toolCallBatchInfo("call-2", branch), {
+		id: "assistant-batch",
+		isLast: false,
+	});
+	assert.deepEqual(toolCallBatchInfo("call-3", branch), {
+		id: "assistant-batch",
+		isLast: true,
+	});
+});
+
+test("finalizes a denial batch when the final sibling has no tool-call review", () => {
+	const branch = [
+		{
+			type: "message",
+			id: "assistant-with-invalid-final-tool",
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "reviewed-denial" },
+					{ type: "toolCall", id: "invalid-final-tool" },
+				],
+			},
+		},
+	];
+	const tracker = new ReviewBatchTracker();
+	const breaker = new DenialCircuitBreaker();
+	const first = toolCallBatchInfo("reviewed-denial", branch);
+	tracker.record(first.id, true);
+	const fallback = toolCallBatchInfo("invalid-final-tool", branch);
+	assert.equal(fallback.isLast, true);
+	assert.equal(breaker.record(tracker.finish(fallback.id) ?? false), false);
 });
 
 test("honors always rules when an optional path is omitted or empty", () => {

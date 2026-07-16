@@ -5,6 +5,7 @@ import {
 	realpathSync,
 	type Dirent,
 } from "node:fs";
+import { homedir } from "node:os";
 import {
 	basename,
 	dirname,
@@ -61,6 +62,30 @@ export class DenialCircuitBreaker {
 	}
 }
 
+export class ReviewBatchTracker {
+	private batches = new Map<string, { reviewed: boolean; denied: boolean }>();
+
+	reset(): void {
+		this.batches.clear();
+	}
+
+	record(batchId: string, denied: boolean): void {
+		const state = this.batches.get(batchId) ?? {
+			reviewed: false,
+			denied: false,
+		};
+		state.reviewed = true;
+		state.denied ||= denied;
+		this.batches.set(batchId, state);
+	}
+
+	finish(batchId: string): boolean | undefined {
+		const state = this.batches.get(batchId);
+		this.batches.delete(batchId);
+		return state?.reviewed ? state.denied : undefined;
+	}
+}
+
 const SENSITIVE_BASENAMES = new Set([
 	".env",
 	"credentials",
@@ -89,7 +114,6 @@ const SENSITIVE_SEGMENTS = new Set([
 	".kube",
 	".git",
 	".github",
-	".pi",
 	"secrets",
 	"credentials",
 	"terraform",
@@ -139,7 +163,6 @@ const EXTERNAL_PRIVATE_SEGMENTS = new Set([
 	".azure",
 	".kube",
 	".docker",
-	".pi",
 	".password-store",
 	".mozilla",
 	"keychains",
@@ -211,6 +234,110 @@ const PRIVATE_READ_SUFFIXES = [
 	".tfvars",
 ];
 
+const PI_PRIVATE_ROOT_FILES = new Set([
+	"settings.json",
+	"web-search.json",
+	"knowledge-search-.json",
+]);
+const PI_PRIVATE_AGENT_FILES = new Set([
+	"auth.json",
+	"approval-guardian.json",
+	"models-store.json",
+	"models.json",
+	"run-history.jsonl",
+	"settings.json",
+	"trust.json",
+]);
+
+function startsWithSegments(values: string[], prefix: string[]): boolean {
+	return prefix.every((segment, index) => values[index] === segment);
+}
+
+function piRelativeSegments(segments: string[]): string[] | undefined {
+	const piIndex = segments.lastIndexOf(".pi");
+	return piIndex >= 0 ? segments.slice(piIndex + 1) : undefined;
+}
+
+const PI_INSTALLED_PACKAGE_ROOTS = [
+	resolve(homedir(), ".pi", "agent", "npm", "node_modules"),
+	resolve(homedir(), ".pi", "npm", "node_modules"),
+	resolve(homedir(), ".pi", "context-mode", "insight-cache", "node_modules"),
+].map((path) => canonicalizePath(path));
+
+function isInstalledPiPackagePath(absolutePath: string): boolean {
+	return PI_INSTALLED_PACKAGE_ROOTS.some((root) => {
+		const rel = relative(root, absolutePath);
+		return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+	});
+}
+
+const PI_SENSITIVE_MUTATION_DIRECTORIES = new Set([
+	"agents",
+	"chains",
+	"extensions",
+	"git",
+	"npm",
+	"prompts",
+	"skills",
+	"themes",
+]);
+
+function isSensitivePiMutationPath(segments: string[]): boolean {
+	const relativeSegments = piRelativeSegments(segments);
+	if (!relativeSegments) return false;
+	if (relativeSegments.length === 0) return true;
+	return PI_SENSITIVE_MUTATION_DIRECTORIES.has(relativeSegments[0] ?? "");
+}
+
+function isPiPrivatePath(segments: string[], file: string): boolean {
+	const relativeSegments = piRelativeSegments(segments);
+	if (!relativeSegments || relativeSegments.length === 0) return false;
+	if (
+		relativeSegments[0] === "memory" ||
+		relativeSegments[0] === "pi-acp" ||
+		relativeSegments[0]?.startsWith("knowledge-search-") === true
+	) {
+		return true;
+	}
+
+	if (relativeSegments.length === 1) {
+		return PI_PRIVATE_ROOT_FILES.has(file);
+	}
+
+	if (relativeSegments[0] === "agent") {
+		if (
+			relativeSegments[1] === "sessions" ||
+			startsWithSegments(relativeSegments, ["agent", "delegates", "jobs"])
+		) {
+			return true;
+		}
+		if (relativeSegments.length === 2) {
+			return (
+				PI_PRIVATE_AGENT_FILES.has(file) ||
+				file.startsWith("settings.json.") ||
+				file.startsWith("models.json.") ||
+				file.endsWith("-api-key")
+			);
+		}
+		if (relativeSegments[1]?.startsWith("archive-")) {
+			return (
+				file.includes("api-key") ||
+				file.endsWith(".log") ||
+				file.startsWith("settings.json") ||
+				file.includes("models.json")
+			);
+		}
+	}
+
+	return (
+		startsWithSegments(relativeSegments, ["context-mode", "content"]) ||
+		startsWithSegments(relativeSegments, ["context-mode", "sessions"]) ||
+		startsWithSegments(relativeSegments, ["session-search", "index"]) ||
+		(startsWithSegments(relativeSegments, ["session-search"]) &&
+			file === "config.json")
+	);
+}
+
 export interface MutationReviewTarget {
 	absolutePath: string;
 	outsideProject: boolean;
@@ -246,6 +373,9 @@ export function classifyMutationPath(
 		SENSITIVE_SUFFIXES.some((suffix) => file.endsWith(suffix)) ||
 		normalizedSegments.some((segment) =>
 			SENSITIVE_SEGMENTS.has(segment.toLowerCase()),
+		) ||
+		isSensitivePiMutationPath(
+			normalizedSegments.map((segment) => segment.toLowerCase()),
 		);
 	const reasons = [
 		...(outsideProject ? ["outside project"] : []),
@@ -300,6 +430,7 @@ export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 		.filter(Boolean)
 		.map((segment) => segment.toLowerCase());
 	const file = normalizedSegments.at(-1) ?? "";
+	const installedPiPackage = isInstalledPiPackagePath(absolutePath);
 	const privateBasename =
 		PRIVATE_READ_BASENAMES.has(file) ||
 		file.startsWith(".env.") ||
@@ -308,8 +439,10 @@ export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 		file.endsWith(".secret") ||
 		file.endsWith(".secrets") ||
 		PRIVATE_READ_SUFFIXES.some((suffix) => file.endsWith(suffix));
-	const projectPrivateSegment = normalizedSegments.some((segment) =>
-		PROJECT_PRIVATE_SEGMENTS.has(segment),
+	const projectPrivateSegment = normalizedSegments.some(
+		(segment) =>
+			PROJECT_PRIVATE_SEGMENTS.has(segment) &&
+			!(installedPiPackage && segment === "private"),
 	);
 	const privateDirectory =
 		normalizedSegments.some((segment) =>
@@ -325,12 +458,14 @@ export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 		PRIVATE_PATH_FRAGMENTS.some((fragment) =>
 			`/${normalizedSegments.join("/")}/`.includes(fragment),
 		);
+	const piPrivate = isPiPrivatePath(normalizedSegments, file);
 	const privatePath =
-		privateBasename || projectPrivateSegment || privateDirectory;
+		privateBasename || projectPrivateSegment || privateDirectory || piPrivate;
 	const reasons = [
 		...(privateBasename ? ["private file"] : []),
 		...(projectPrivateSegment ? ["private directory"] : []),
 		...(privateDirectory ? ["common private directory"] : []),
+		...(piPrivate ? ["private Pi data"] : []),
 	];
 	return { absolutePath, outsideProject, private: privatePath, reasons };
 }

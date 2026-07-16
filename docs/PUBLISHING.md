@@ -2,21 +2,11 @@
 
 This document is for maintainers of `pi-approval-guardian`. Users normally install the package with `pi install npm:pi-approval-guardian` and do not need these steps.
 
-## Current registry status
-
-At the time this guide was written:
-
-- npm package name: `pi-approval-guardian`
-- npm owner logged in locally: `mics8128`
-- the package name was available (`npm view pi-approval-guardian` returned `E404`)
-- `npm pack --dry-run` successfully produced a package preview
-
-Registry state can change. Recheck the name immediately before the first release.
-
 ## Requirements
 
 - Node.js 22.19 or newer
 - npm account with 2FA enabled
+- npm 11.15.0 or newer for `npm trust`
 - permission to publish `pi-approval-guardian`
 - clean Git worktree on the release commit
 - all translated READMEs updated together
@@ -37,7 +27,7 @@ Official references:
 - `extensions/`
 - `src/`
 - `README.md` and localized `README.*.md` files
-- `docs/PUBLISHING.md`
+- `docs/PUBLISHING.md` and `docs/REFERENCE.md`
 - MIT `LICENSE`
 - `LICENSES/Apache-2.0.txt` and `NOTICE` for adapted OpenAI Codex Guardian materials
 - npm-required package metadata
@@ -86,13 +76,15 @@ Use semantic versioning:
 - **minor**: compatible feature, new guarded action, or new configuration option
 - **major**: breaking configuration, behavior, package, or compatibility change
 
-From a clean branch:
+Prepare the version on a release branch:
 
 ```bash
-npm version patch   # or minor / major
+npm version patch --no-git-tag-version   # or minor / major
 npm run check
-git push --follow-tags
+npm run package:check
 ```
+
+Commit the version change, open a pull request, wait for required CI, and merge it into `main`. Create and push the matching `v<version>` tag from the merged release commit. The tag triggers the trusted-publishing workflow.
 
 For prereleases:
 
@@ -105,12 +97,25 @@ Do not publish prereleases under `latest`.
 
 ## Trusted publishing with GitHub Actions
 
-After the first package exists, configure a trusted publisher on npmjs.com for:
+After the first package exists, use npm 11.15.0 or newer to configure the publisher:
 
-- owner: `mics8128`
+```bash
+npm install --global npm@^11.15.0
+npm trust github pi-approval-guardian \
+  --file publish.yml \
+  --repository mics8128/pi-approval-guardian \
+  --environment npm \
+  --allow-publish \
+  --yes
+```
+
+The equivalent npmjs.com fields are:
+
+- owner/user: `mics8128`
 - repository: `pi-approval-guardian`
-- workflow: `publish.yml`
+- workflow filename: `publish.yml`
 - GitHub environment: `npm`
+- permission: publish
 
 The repository includes `.github/workflows/publish.yml`. It uses GitHub OIDC and requires:
 
@@ -121,6 +126,8 @@ permissions:
 ```
 
 No long-lived npm publish token is required. Trusted publishing requires a supported npm CLI and a GitHub-hosted runner. For public packages from public repositories, npm generates provenance automatically.
+
+An HTTP 400 from `npm trust` after successful 2FA commonly means the local npm CLI is older than 11.15.0 or the required `--allow-publish` permission was omitted. Check `npm --version`, upgrade, and retry with the command above.
 
 Once trusted publishing is proven, configure npm package publishing access to require 2FA and disallow traditional automation tokens, then revoke unused write tokens.
 
@@ -151,7 +158,16 @@ Once trusted publishing is proven, configure npm package publishing access to re
 - `pi -e .` loads the local package successfully;
 - the packed file list contains no credentials or local configuration.
 
-After npm publication and registry verification, allow time for the gallery index to refresh, then verify the package appears on `https://pi.dev/packages` and that its installation command resolves.
+After npm publication and registry verification, allow time for the npm search index and gallery catalog to refresh. The package detail route may work before catalog search does. Check both:
+
+```bash
+npm search pi-approval-guardian
+```
+
+- `https://pi.dev/packages/pi-approval-guardian`
+- `https://pi.dev/packages?name=pi-approval-guardian`
+
+If the direct detail route works but `npm search` and the catalog list do not, no package-author action is normally required; wait for npm search indexing and the next Pi catalog refresh.
 
 ## Emergency handling
 
