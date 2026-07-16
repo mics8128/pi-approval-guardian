@@ -1,9 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_REVIEWER_MODEL, REVIEW_TIMEOUT_MS } from "./review.ts";
+import {
+	DEFAULT_REVIEWER_MODEL,
+	REVIEW_TIMEOUT_MS,
+	parseModelSpec,
+} from "./review.ts";
 
 export const MODEL_ENV = "PI_APPROVAL_GUARDIAN_MODEL";
+export const FALLBACK_MODEL_ENV = "PI_APPROVAL_GUARDIAN_FALLBACK_MODEL";
 export const POLICY_ENV = "PI_APPROVAL_GUARDIAN_POLICY";
 export const TIMEOUT_ENV = "PI_APPROVAL_GUARDIAN_TIMEOUT_MS";
 export const CONFIG_FILE_NAME = "approval-guardian.json";
@@ -26,19 +31,28 @@ export const DEFAULT_REVIEW_RULES: Readonly<Record<string, ReviewLevel>> = {
 
 interface GuardianConfigFile {
 	model?: unknown;
+	fallbackModel?: unknown;
 	timeoutMs?: unknown;
 	policy?: unknown;
 	review?: unknown;
 }
 
+type ConfigSource = "environment" | "project" | "global" | "default";
+
 export interface GuardianConfig {
 	model: string;
+	fallbackModel: string;
 	timeoutMs: number;
 	policy?: string;
 	review: Record<string, ReviewLevel>;
 	globalPath: string;
 	projectPath: string;
-	projectConfigLoaded: boolean;
+	globalConfigPresent: boolean;
+	projectConfigPresent: boolean;
+	modelSource: ConfigSource;
+	fallbackModelSource: ConfigSource;
+	timeoutSource: ConfigSource;
+	policySources: Array<"environment" | "project" | "global">;
 	warnings: string[];
 }
 
@@ -58,7 +72,15 @@ export function loadGuardianConfig(
 	const projectPath = join(options.cwd, CONFIG_DIR_NAME, CONFIG_FILE_NAME);
 	const warnings: string[] = [];
 	if (env[MODEL_ENV] !== undefined && !isModelSpecString(env[MODEL_ENV])) {
-		warnings.push(`Invalid ${MODEL_ENV}: expected provider/model.`);
+		warnings.push(`Invalid ${MODEL_ENV}: expected provider/model-id.`);
+	}
+	if (
+		env[FALLBACK_MODEL_ENV] !== undefined &&
+		!isModelSpecString(env[FALLBACK_MODEL_ENV])
+	) {
+		warnings.push(
+			`Invalid ${FALLBACK_MODEL_ENV}: expected provider/model-id.`,
+		);
 	}
 	if (
 		env[TIMEOUT_ENV] !== undefined &&
@@ -73,21 +95,29 @@ export function loadGuardianConfig(
 		? readConfigFile(projectPath, warnings)
 		: {};
 
-	const model =
-		firstString(env[MODEL_ENV], projectConfig.model, globalConfig.model) ??
-		DEFAULT_REVIEWER_MODEL;
-	const timeoutMs =
-		firstTimeout(
-			env[TIMEOUT_ENV],
-			projectConfig.timeoutMs,
-			globalConfig.timeoutMs,
-		) ?? REVIEW_TIMEOUT_MS;
-	const policies = [globalConfig.policy, projectConfig.policy, env[POLICY_ENV]]
-		.filter(
-			(value): value is string =>
-				typeof value === "string" && value.trim().length > 0,
-		)
-		.map((value) => value.trim());
+	const modelValue = firstWithSource(
+		["environment", env[MODEL_ENV]],
+		["project", projectConfig.model],
+		["global", globalConfig.model],
+	);
+	const fallbackModelValue = firstWithSource(
+		["environment", env[FALLBACK_MODEL_ENV]],
+		["project", projectConfig.fallbackModel],
+		["global", globalConfig.fallbackModel],
+	);
+	const timeoutValue = firstTimeoutWithSource(
+		["environment", env[TIMEOUT_ENV]],
+		["project", projectConfig.timeoutMs],
+		["global", globalConfig.timeoutMs],
+	);
+	const policies = [
+		["global", globalConfig.policy],
+		["project", projectConfig.policy],
+		["environment", env[POLICY_ENV]],
+	] as const;
+	const policySources = policies.flatMap(([source, value]) =>
+		typeof value === "string" && value.trim().length > 0 ? [source] : [],
+	);
 
 	const globalReview = parseReviewRules(
 		globalConfig.review,
@@ -102,13 +132,26 @@ export function loadGuardianConfig(
 	const review = mergeReviewRules(globalReview, projectReview);
 
 	return {
-		model,
-		timeoutMs,
-		policy: policies.length > 0 ? policies.join("\n\n") : undefined,
+		model: modelValue?.value ?? DEFAULT_REVIEWER_MODEL,
+		fallbackModel: fallbackModelValue?.value ?? DEFAULT_REVIEWER_MODEL,
+		timeoutMs: timeoutValue?.value ?? REVIEW_TIMEOUT_MS,
+		policy:
+			policySources.length > 0
+				? policies
+						.flatMap(([, value]) =>
+							typeof value === "string" && value.trim() ? [value.trim()] : [],
+						)
+						.join("\n\n")
+				: undefined,
 		review,
 		globalPath,
 		projectPath,
-		projectConfigLoaded: options.projectTrusted && existsSync(projectPath),
+		globalConfigPresent: existsSync(globalPath),
+		projectConfigPresent: existsSync(projectPath),
+		modelSource: modelValue?.source ?? "default",
+		fallbackModelSource: fallbackModelValue?.source ?? "default",
+		timeoutSource: timeoutValue?.source ?? "default",
+		policySources,
 		warnings,
 	};
 }
@@ -118,7 +161,7 @@ function readConfigFile(path: string, warnings: string[]): GuardianConfigFile {
 	try {
 		const parsed = JSON.parse(readFileSync(path, "utf8"));
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			warnings.push(`Ignoring ${path}: expected a JSON object.`);
+			warnings.push(`Invalid ${path}: expected a JSON object.`);
 			return {};
 		}
 		const config = parsed as GuardianConfigFile;
@@ -126,11 +169,19 @@ function readConfigFile(path: string, warnings: string[]): GuardianConfigFile {
 		return config;
 	} catch (error) {
 		warnings.push(
-			`Ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`,
+			`Invalid or unreadable ${path}: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		return {};
 	}
 }
+
+const CONFIG_FILE_KEYS = new Set([
+	"model",
+	"fallbackModel",
+	"timeoutMs",
+	"policy",
+	"review",
+]);
 
 const REVIEW_LEVEL_RANK: Record<ReviewLevel, number> = {
 	off: 0,
@@ -162,8 +213,21 @@ function validateConfigFile(
 	path: string,
 	warnings: string[],
 ): void {
+	for (const key of Object.keys(config)) {
+		if (!CONFIG_FILE_KEYS.has(key)) {
+			warnings.push(`Unknown top-level key ${key} in ${path}.`);
+		}
+	}
 	if (config.model !== undefined && !isModelSpecString(config.model)) {
-		warnings.push(`Invalid model in ${path}: expected provider/model string.`);
+		warnings.push(`Invalid model in ${path}: expected provider/model-id string.`);
+	}
+	if (
+		config.fallbackModel !== undefined &&
+		!isModelSpecString(config.fallbackModel)
+	) {
+		warnings.push(
+			`Invalid fallbackModel in ${path}: expected provider/model-id string.`,
+		);
 	}
 	if (
 		config.timeoutMs !== undefined &&
@@ -185,11 +249,15 @@ function parseReviewRules(
 ): Record<string, ReviewLevel> {
 	if (value === undefined) return {};
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		warnings.push(`Ignoring review rules in ${path}: expected an object.`);
+		warnings.push(`Invalid review in ${path}: expected an object.`);
 		return {};
 	}
 	const rules: Record<string, ReviewLevel> = {};
 	for (const [key, level] of Object.entries(value)) {
+		if (!isReviewRuleKey(key)) {
+			warnings.push(`Unsupported review.${key} in ${path}.`);
+			continue;
+		}
 		if (
 			level === "always" ||
 			level === "outside-or-private" ||
@@ -198,22 +266,45 @@ function parseReviewRules(
 		) {
 			rules[key] = level;
 		} else {
-			warnings.push(`Ignoring review.${key} in ${path}: invalid level.`);
+			warnings.push(
+				`Invalid review.${key} in ${path}: expected always, outside-or-private, private-only, or off.`,
+			);
 		}
 	}
 	return rules;
 }
 
+function isReviewRuleKey(key: string): boolean {
+	if (Object.hasOwn(DEFAULT_REVIEW_RULES, key)) return true;
+	const toolName = key.endsWith(".path") ? key.slice(0, -".path".length) : "";
+	return toolName.length > 0 && !/\s/.test(toolName);
+}
+
 function isModelSpecString(value: unknown): value is string {
 	return (
 		typeof value === "string" &&
-		/^[^/\s]+\/[^/\s]+$/.test(value.trim())
+		value.trim().length > 0 &&
+		parseModelSpec(value) !== undefined
 	);
 }
 
-function firstString(...values: unknown[]): string | undefined {
-	for (const value of values) {
-		if (typeof value === "string" && value.trim()) return value.trim();
+function firstWithSource(
+	...values: Array<[GuardianConfig["modelSource"], unknown]>
+): { source: GuardianConfig["modelSource"]; value: string } | undefined {
+	for (const [source, value] of values) {
+		if (typeof value === "string" && value.trim()) {
+			return { source, value: value.trim() };
+		}
+	}
+	return undefined;
+}
+
+function firstTimeoutWithSource(
+	...values: Array<[GuardianConfig["timeoutSource"], unknown]>
+): { source: GuardianConfig["timeoutSource"]; value: number } | undefined {
+	for (const [source, value] of values) {
+		const timeout = firstTimeout(value);
+		if (timeout !== undefined) return { source, value: timeout };
 	}
 	return undefined;
 }

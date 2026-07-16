@@ -94,9 +94,9 @@ Canonical paths and symlink targets are checked before project-boundary decision
 - Never provides `bash`, `write`, or `edit` to the reviewer.
 - Treats transcript, files, tool output, and planned actions as untrusted evidence.
 - Reuses the reviewer session with bounded transcript deltas.
-- Retries malformed output and selected transient provider failures up to three attempts within one shared deadline.
+- Retries malformed output and selected transient provider failures up to three attempts within one shared deadline per reviewer channel.
 
-Three consecutive explicit-denial batches, or ten denial batches among the latest fifty reviews, open the per-run circuit. Sibling tool calls emitted by one assistant message form one batch, so simultaneous denials count once.
+Three consecutive adverse batches, or ten adverse batches among the latest fifty reviews, open the per-run circuit. Denials, timeouts, and failures are adverse; allows and cancellations are not. Sibling tool calls emitted by one assistant message form one batch.
 
 ## Optional configuration
 
@@ -117,12 +117,13 @@ Minimal example:
 ```json
 {
   "model": "openai-codex/codex-auto-review",
+  "fallbackModel": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "Never mutate production without exact informed authorization."
 }
 ```
 
-Custom reviewer channels are supported when the provider/model is already registered and authenticated in Pi.
+Custom reviewer channels are supported when the provider/model is already registered and authenticated in Pi. `fallbackModel` defaults to the official `openai-codex/codex-auto-review`; when a distinct primary is missing, unauthenticated, fails, or times out, Guardian tries the fallback and shows a UI-only warning. Explicit deny and cancellation do not trigger fallback.
 
 ### Review scopes
 
@@ -157,11 +158,12 @@ off < private-only < outside-or-private < always
 
 ```bash
 export PI_APPROVAL_GUARDIAN_MODEL="openai-codex/codex-auto-review"
+export PI_APPROVAL_GUARDIAN_FALLBACK_MODEL="openai-codex/codex-auto-review"
 export PI_APPROVAL_GUARDIAN_TIMEOUT_MS="90000"
 export PI_APPROVAL_GUARDIAN_POLICY="Only perform the explicitly requested production action."
 ```
 
-Model and timeout precedence:
+Primary model, fallback model, and timeout precedence:
 
 ```text
 environment > trusted project > global > built-in default
@@ -169,7 +171,7 @@ environment > trusted project > global > built-in default
 
 Policy is additive across global, trusted-project, and environment configuration.
 
-Run `/approval-guardian rules` to inspect the effective rule matrix.
+Run `/approval-guardian` to inspect primary/fallback readiness and effective config sources, or `/approval-guardian rules` for the rule matrix.
 
 ## Update and remove
 
@@ -191,11 +193,14 @@ Remove it:
 pi remove npm:pi-approval-guardian
 ```
 
-Project-local installation:
+Project-local installation and removal:
 
 ```bash
 pi install -l npm:pi-approval-guardian
+pi remove -l npm:pi-approval-guardian
 ```
+
+Run `/reload` after removal to unload it from the current session.
 
 A versioned install such as `npm:pi-approval-guardian@<version>` is pinned. Install a newer explicit version to move that pin.
 
@@ -205,11 +210,12 @@ A versioned install such as `npm:pi-approval-guardian@<version>` is pinned. Inst
 - Reviewer decisions are probabilistic and can be wrong.
 - The reviewer provider receives a bounded transcript and planned-action metadata.
 - An authorized private read is not redacted from the main conversation.
-- The path rules are heuristic; unusual or renamed secrets may not be detected.
-- Shell syntax is not fully parsed, so indirect shell reads may fall outside deterministic path detection.
-- Arbitrary pathless custom tools, MCP, network, browser, email, deployment, and subagent actions are not automatically gated unless configured through a recognized path rule.
+- Paths use Pi-compatible `~`, `@`, `file://`, and Unicode-space normalization before classification, but the rules remain heuristic; unusual or renamed secrets may not be detected.
+- Shell syntax is not fully parsed; Guardian uses bounded glob matching for common private targets, so indirect shell reads may still fall outside deterministic detection.
+- After an allow, Guardian validates and locks JSON-like tool input against later `tool_call` handler mutation; exotic runtime values fail closed. It does not observe commandPrefix, spawnHook, custom-tool internals, or filesystem changes after dispatch.
+- Arbitrary pathless or nested-path custom tools, MCP, network, browser, email, deployment, and subagent actions are not automatically gated; they need dedicated enforcement.
 - Filesystem state can change between review and execution.
-- Reviewer/provider availability is an availability dependency because the extension intentionally fails closed.
+- If both the primary and fallback reviewer channels are unavailable, protected actions fail closed.
 - Use Pi project trust and OS/container sandboxing separately; they solve different security layers.
 
 For the full behavior and configuration contract, see [docs/REFERENCE.md](docs/REFERENCE.md).

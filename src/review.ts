@@ -72,7 +72,7 @@ export function parseModelSpec(
 ): { provider: string; model: string } | undefined {
 	const spec = value?.trim() || DEFAULT_REVIEWER_MODEL;
 	const slash = spec.indexOf("/");
-	if (slash <= 0 || slash === spec.length - 1) return undefined;
+	if (slash <= 0 || slash === spec.length - 1 || /\s/.test(spec)) return undefined;
 	return { provider: spec.slice(0, slash), model: spec.slice(slash + 1) };
 }
 

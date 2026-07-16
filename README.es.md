@@ -90,9 +90,9 @@ Se comprueban canonical paths y targets de symlinks.
 - Reviews de autorización privada: sin tools.
 - Nunca recibe `bash`, `write` ni `edit`.
 - Transcript, archivos, tool output y planned action se tratan como evidencia no confiable.
-- Hasta 3 attempts para assessments inválidos y ciertos errores transitorios dentro de un deadline compartido.
+- Hasta 3 attempts para assessments inválidos y ciertos errores transitorios dentro de un deadline compartido por reviewer channel.
 
-Tres batches consecutivos con denial, o diez entre los últimos cincuenta, abren el circuito. Las sibling tool calls de un mismo assistant message forman un solo batch, por lo que varias denegaciones simultáneas cuentan una vez.
+Tres batches adversos consecutivos, o diez entre los últimos cincuenta, abren el circuito. Deny, timeout y failure son adversos; allow y cancelación no lo son. Las sibling tool calls de un mismo assistant message forman un solo batch.
 
 ## Configuración opcional
 
@@ -103,12 +103,13 @@ Trusted project: `<project>/.pi/approval-guardian.json`
 ```json
 {
   "model": "openai-codex/codex-auto-review",
+  "fallbackModel": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "No modificar producción sin autorización exacta."
 }
 ```
 
-También se admiten custom reviewer channels ya registrados y autenticados en el model registry de Pi.
+También se admiten custom reviewer channels ya registrados y autenticados en Pi. `fallbackModel` usa por defecto el `openai-codex/codex-auto-review` oficial. Si un primary distinto no existe, no tiene auth utilizable, falla o agota el tiempo, Guardian prueba el fallback y muestra un aviso solo en la UI. Un deny explícito o una cancelación no activan fallback.
 
 Review matrix por defecto:
 
@@ -134,11 +135,11 @@ Un trusted project solo puede reforzar la protección global:
 off < private-only < outside-or-private < always
 ```
 
-Variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_TIMEOUT_MS`, `PI_APPROVAL_GUARDIAN_POLICY`.
+Variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`, `PI_APPROVAL_GUARDIAN_TIMEOUT_MS`, `PI_APPROVAL_GUARDIAN_POLICY`.
 
-Precedencia de model/timeout: `environment > trusted project > global > built-in default`. La policy combina configuración global, trusted project y environment.
+Precedencia de primary model/fallback model/timeout: `environment > trusted project > global > built-in default`. La policy combina configuración global, trusted project y environment.
 
-Usa `/approval-guardian rules` para ver las reglas efectivas.
+Usa `/approval-guardian` para ver el estado primary/fallback y las fuentes de configuración; `/approval-guardian rules` muestra las reglas efectivas.
 
 ## Actualizar y eliminar
 
@@ -152,11 +153,14 @@ Después ejecuta `/reload`.
 pi remove npm:pi-approval-guardian
 ```
 
-Instalación local al proyecto:
+Instalación y eliminación local al proyecto:
 
 ```bash
 pi install -l npm:pi-approval-guardian
+pi remove -l npm:pi-approval-guardian
 ```
+
+Después de eliminarlo, ejecuta `/reload`.
 
 Un npm spec con versión queda fijado. Para mover el pin, instala una nueva versión explícita.
 
@@ -166,11 +170,12 @@ Un npm spec con versión queda fijado. Para mover el pin, instala una nueva vers
 - Las decisiones del reviewer son probabilísticas.
 - El provider recibe un transcript acotado y metadata de la acción.
 - Una lectura privada autorizada no se redacta en la conversación principal.
-- Las reglas de paths son heurísticas y no detectan todos los secrets renombrados o indirectos.
-- El shell no se analiza como un AST completo.
+- La clasificación de paths aplica antes la normalización compatible con Pi de `~`, `@`, `file://` y espacios Unicode, pero las reglas siguen siendo heurísticas y no detectan todos los secrets renombrados o indirectos.
+- El shell no se analiza como un AST completo. Guardian solo usa bounded glob matching para targets privados comunes, por lo que puede omitir lecturas indirectas.
+- Tras allow, Guardian valida y bloquea el tool input JSON-like para impedir cambios de handlers `tool_call` posteriores; los runtime values exóticos fallan closed. No observa commandPrefix, spawnHook, custom-tool internals ni cambios del filesystem después de dispatch.
+- Pathless o nested-path custom tools, MCP, network, browser, email, deployment y subagent actions no quedan cubiertas automáticamente; necesitan dedicated enforcement.
 - El estado del filesystem puede cambiar entre review y ejecución.
-- Pathless custom tools, MCP, network, browser, email, deployment y subagent actions no quedan cubiertas automáticamente.
-- Si reviewer/provider no está disponible, las acciones protegidas se bloquean.
+- Si los canales reviewer primary y fallback no están disponibles, las acciones protegidas se bloquean fail-closed.
 
 Referencia técnica completa: [docs/REFERENCE.md](docs/REFERENCE.md)
 

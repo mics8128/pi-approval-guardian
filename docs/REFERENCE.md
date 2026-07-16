@@ -14,7 +14,7 @@ This document defines the runtime behavior and configuration contract for `pi-ap
 | `write.path` | `outside-or-private` | Reviews targets outside the project and private/sensitive mutations. |
 | `edit.path` | `outside-or-private` | Uses the same boundary and sensitivity rules as `write`. |
 
-An unconfigured tool with a string `path` parameter defaults to `private-only`. Tools without a recognized path remain outside the gate unless explicitly handled by another rule.
+An unconfigured tool with a top-level string `path` parameter defaults to `private-only`. Tools without that recognized top-level path, including nested-path and pathless custom tools, remain outside the gate unless they have dedicated enforcement.
 
 Direct user shell commands entered with `!`/`!!` do not pass through the agent `tool_call` hook.
 
@@ -50,10 +50,11 @@ Schema:
 ```json
 {
   "model": "provider/model",
+  "fallbackModel": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "Additional policy text",
   "review": {
-    "tool.parameter": "always | outside-or-private | private-only | off"
+    "custom-tool.path": "always | outside-or-private | private-only | off"
   }
 }
 ```
@@ -61,10 +62,11 @@ Schema:
 Environment variables:
 
 - `PI_APPROVAL_GUARDIAN_MODEL`
+- `PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`
 - `PI_APPROVAL_GUARDIAN_TIMEOUT_MS`
 - `PI_APPROVAL_GUARDIAN_POLICY`
 
-Model and timeout precedence:
+Primary model, fallback model, and timeout precedence:
 
 ```text
 environment > trusted project > global > default
@@ -76,11 +78,15 @@ Policy composition:
 default policy + global policy + trusted-project policy + environment policy
 ```
 
-Malformed model, timeout, policy, or review configuration produces warnings and blocks covered tool execution fail-closed.
+Malformed primary/fallback model, timeout, policy, review container, review level, unknown top-level key, or unsupported review-rule key produces a fatal diagnostic and blocks covered tool execution fail-closed. The schema is intentionally strict so a misspelled policy or rule cannot be silently ignored; remove obsolete metadata keys when upgrading. Review rules allow the documented built-in keys and arbitrary custom `<tool>.path` keys; other parameter names cannot be consumed at runtime. Model IDs may contain additional slashes after the provider separator.
+
+`fallbackModel` defaults to `openai-codex/codex-auto-review`. It is attempted only when it differs from the primary and that primary is missing, lacks usable authentication, returns a terminal failure, or times out. When both settings resolve to the same spec—the default—there is no separate fallback attempt. An explicit deny or cancellation never triggers fallback. Each reviewer channel receives the configured deadline and its own retry budget. When fallback activates, Guardian emits a UI-only warning and does not inject a fallback message into agent context.
+
+`/approval-guardian` reports primary/fallback model, timeout, policy sources, and config-file state. It resolves usable request authentication but does not send a reviewer inference. Startup health performs only the faster configured-auth check, including a degraded warning when a distinct fallback is unavailable.
 
 ## Private-read classification
 
-Classification uses canonical paths and resolves existing symlinks. It is an explicit heuristic blacklist, not a complete DLP boundary.
+Classification normalizes leading `~`, `@`, `file://` URLs, and Pi's Unicode-space variants before resolving against the current directory. It then uses canonical paths and resolves existing symlinks. It is an explicit heuristic blacklist, not a complete DLP boundary.
 
 ### Common private files
 
@@ -97,7 +103,7 @@ Classification uses canonical paths and resolves existing symlinks. It is an exp
 - password stores, keychains, keyrings, password managers, and browser login stores
 - VPN and system credential locations
 - authenticated CLI configuration such as gcloud, GitHub CLI, GitLab CLI, 1Password CLI, and rclone
-- project `secrets/` and `credentials/` directories
+- project `secrets/` and `credentials/` directories (not a generic project `private/` directory)
 
 ### Pi data
 
@@ -171,7 +177,7 @@ Transcript, tool output, file content, retry reasons, and planned actions are fr
 
 ## Authorization contract
 
-A covered action executes only when the reviewer returns a valid assessment with `outcome: "allow"`.
+A covered action executes only when the reviewer returns a valid assessment with `outcome: "allow"`. Before allowing execution, Guardian validates the input as JSON-like data, deeply freezes it, and makes `event.input` non-writable/non-configurable, so later `tool_call` handlers cannot replace or mutate approved arguments. Exotic runtime values such as typed arrays, `Map`, `Set`, accessors, symbol-keyed properties, sparse arrays, or arrays with custom prototypes/properties fail closed instead of receiving a misleading lock guarantee. Extensions that need to rewrite a covered action must run before Guardian; they cannot rely on post-approval rewriting.
 
 Additional deterministic requirements:
 
@@ -203,7 +209,7 @@ Selection prioritizes the first and latest user intent, other user messages that
 - Successful assessments advance the reviewer transcript cursor.
 - Later reviews send only new transcript entries and the new planned action.
 - Reviewer calls are serialized.
-- Branch divergence, cwd/model/timeout/policy changes, reload, or shutdown dispose the old reviewer session.
+- Branch divergence, cwd/model/fallback-model/timeout/policy changes, channel switches, reload, or shutdown dispose the old reviewer session.
 - Retry attempts use a fresh reviewer session and full bounded transcript.
 
 ## Retry and deadline
@@ -214,21 +220,21 @@ Selection prioritizes the first and latest user intent, other user messages that
 | Initial backoff | 200 ms |
 | Backoff factor | 2× |
 | Jitter | 0.9–1.1× |
-| Default shared deadline | 90 seconds |
-| Allowed timeout range | 1–300 seconds |
+| Default shared deadline per reviewer channel | 90 seconds |
+| Allowed timeout range per reviewer channel | 1–300 seconds |
 
 Retries apply to malformed assessment output and selected transient provider failures such as overload, rate limiting, HTTP 5xx, and transport/stream errors. Quota and billing exhaustion are terminal.
 
-Session startup, attempts, prompts, backoff, and cleanup share one deadline. Explicit allow/deny, cancellation, and terminal timeout are not retried.
+Within one reviewer channel, session startup, attempts, prompts, backoff, and cleanup share one deadline. A distinct fallback channel receives a fresh configured deadline. Explicit allow/deny and cancellation are not retried through fallback; primary failure and timeout may activate it.
 
-## Denial circuit breaker
+## Adverse-outcome circuit breaker
 
 Within one Pi agent run, the circuit opens after:
 
-- three consecutive explicit-denial batches; or
-- ten explicit-denial batches among the latest fifty recorded review batches.
+- three consecutive adverse batches; or
+- ten adverse batches among the latest fifty recorded review batches.
 
-Sibling tool calls from the same assistant message share one batch. Multiple simultaneous denials therefore count once. A batch containing any explicit denial is a denial batch.
+Denied, timeout, and failure results are adverse; allowed and cancelled results are not. Sibling tool calls from the same assistant message share one batch, so multiple simultaneous adverse results count once.
 
 When the circuit opens, the current run is aborted and later covered actions are blocked without another reviewer call.
 
@@ -250,7 +256,8 @@ When the circuit opens, the current run is aborted and later covered actions are
 - Ordinary in-project source edits are intentionally not reviewed.
 - Path detection is heuristic and cannot identify every renamed or indirect secret.
 - Shell commands are not parsed as a complete shell AST.
-- Arbitrary pathless custom tools and unrelated MCP/network/browser/email/deployment/subagent actions are not automatically covered.
+- Arbitrary pathless or nested-path custom tools and unrelated MCP/network/browser/email/deployment/subagent actions are not automatically covered; they need dedicated enforcement.
+- Guardian locks approved `event.input` against later `tool_call` handlers, but cannot observe command prefixes, spawn hooks, or a custom tool's internal behavior after dispatch.
 - Filesystem state may change between classification and execution.
 - Reviewer decisions are probabilistic.
-- Reviewer/provider availability is required because failures block covered actions.
+- At least one configured reviewer channel must be available because failure of both primary and fallback blocks covered actions.

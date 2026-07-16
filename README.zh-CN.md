@@ -90,9 +90,9 @@ Pi agent tool call
 - 私密数据授权审查不提供任何工具。
 - Reviewer 不获得 `bash`、`write`、`edit`。
 - Transcript、文件、tool output 和 planned action 均视为不可信 evidence。
-- 在共享 deadline 内，无效 assessment 和部分临时 provider failure 最多尝试 3 次。
+- 每个 reviewer channel 各自在共享 deadline 内，对无效 assessment 和部分临时 provider failure 最多尝试 3 次。
 
-连续 3 个明确 denial batch，或最近 50 个 review batch 累计 10 个 denial，会打开 circuit。同一条 assistant message 同时发出的 sibling tool calls 视为一个 batch，因此多个同步 denial 只计一次。
+连续 3 个 adverse batch，或最近 50 个 review batch 累计 10 个 adverse batch，会打开 circuit。Deny、timeout 和 failure 属于 adverse；allow 与取消不计。同一条 assistant message 的 sibling tool calls 视为一个 batch。
 
 ## 可选配置
 
@@ -103,12 +103,13 @@ Trusted project：`<project>/.pi/approval-guardian.json`
 ```json
 {
   "model": "openai-codex/codex-auto-review",
+  "fallbackModel": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "未经精确授权不得修改 production。"
 }
 ```
 
-也可使用已在 Pi model registry 注册并完成认证的自定义 reviewer channel。
+也可使用已在 Pi model registry 注册并完成认证的自定义 reviewer channel。`fallbackModel` 默认使用官方 `openai-codex/codex-auto-review`；不同的 primary 找不到、没有可用认证、失败或超时时，Guardian 会尝试 fallback，并且仅在 UI 显示简短提示。明确 deny 或取消不会触发 fallback。
 
 默认 review matrix：
 
@@ -134,11 +135,11 @@ Trusted project 只能加强 global 保护：
 off < private-only < outside-or-private < always
 ```
 
-环境变量：`PI_APPROVAL_GUARDIAN_MODEL`、`PI_APPROVAL_GUARDIAN_TIMEOUT_MS`、`PI_APPROVAL_GUARDIAN_POLICY`。
+环境变量：`PI_APPROVAL_GUARDIAN_MODEL`、`PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`、`PI_APPROVAL_GUARDIAN_TIMEOUT_MS`、`PI_APPROVAL_GUARDIAN_POLICY`。
 
-Model/timeout precedence：`environment > trusted project > global > built-in default`。Policy 会合并 global、trusted project 和 environment 配置。
+Primary model、fallback model 与 timeout precedence：`environment > trusted project > global > built-in default`。Policy 会合并 global、trusted project 和 environment 配置。
 
-运行 `/approval-guardian rules` 可查看生效规则。
+运行 `/approval-guardian` 可查看 primary／fallback readiness 与有效配置来源；`/approval-guardian rules` 可查看生效规则。
 
 ## 更新与移除
 
@@ -152,11 +153,14 @@ pi update npm:pi-approval-guardian
 pi remove npm:pi-approval-guardian
 ```
 
-项目本地安装：
+项目本地安装与移除：
 
 ```bash
 pi install -l npm:pi-approval-guardian
+pi remove -l npm:pi-approval-guardian
 ```
+
+移除后运行 `/reload`。
 
 带版本号的 npm spec 会固定版本；更新 pin 时需要安装新的明确版本。
 
@@ -166,11 +170,12 @@ pi install -l npm:pi-approval-guardian
 - Reviewer 判断具有概率性，可能出错。
 - Reviewer provider 会收到 bounded transcript 和 planned-action metadata。
 - 已授权的私密读取不会在主对话中自动遮罩。
-- 路径规则是 heuristic，不能识别所有重命名或间接 secret。
-- Shell 不会被完整解析为 AST，复杂间接读取可能漏判。
+- 路径分类先采用与 Pi 一致的 `~`、`@`、`file://` 和 Unicode 空白规范化，但规则仍是 heuristic，不能识别所有重命名或间接 secret。
+- Shell 不会被完整解析为 AST；Guardian 仅对常见私密目标做有界 glob 匹配，复杂间接读取仍可能漏判。
+- allow 后 Guardian 会验证并锁定 JSON-like tool input，避免后续 `tool_call` handler 改写；exotic runtime value 会 fail closed。它无法观察 commandPrefix、spawnHook、custom tool 内部行为或 dispatch 后的 filesystem 变化。
+- Pathless 或 nested-path custom tools、MCP、network、browser、email、deployment 和 subagent 动作不会自动全部受保护，必须有专门 enforcement。
 - Filesystem 状态可能在审查和执行之间发生变化。
-- Pathless custom tools、MCP、network、browser、email、deployment 和 subagent 动作不会自动全部受保护。
-- Reviewer/provider 不可用时，受保护动作会被阻止。
+- Primary 和 fallback reviewer channel 都不可用时，受保护动作会 fail closed。
 
 完整技术说明见 [docs/REFERENCE.md](docs/REFERENCE.md)。
 

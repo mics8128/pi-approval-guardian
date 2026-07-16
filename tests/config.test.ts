@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { loadGuardianConfig } from "../src/config.ts";
+import { parseModelSpec } from "../src/review.ts";
 
 test("loads global and trusted project config with documented precedence", () => {
 	const root = mkdtempSync(join(tmpdir(), "approval-guardian-"));
@@ -15,6 +16,7 @@ test("loads global and trusted project config with documented precedence", () =>
 		join(agentDir, "approval-guardian.json"),
 		JSON.stringify({
 			model: "global/reviewer",
+			fallbackModel: "global/fallback",
 			timeoutMs: 60_000,
 			policy: "global policy",
 			review: { "grep.path": "outside-or-private", "read.path": "off" },
@@ -24,6 +26,7 @@ test("loads global and trusted project config with documented precedence", () =>
 		join(cwd, ".pi", "approval-guardian.json"),
 		JSON.stringify({
 			model: "project/reviewer",
+			fallbackModel: "project/fallback",
 			policy: "project policy",
 			review: { "read.path": "private-only" },
 		}),
@@ -33,15 +36,21 @@ test("loads global and trusted project config with documented precedence", () =>
 		cwd,
 		projectTrusted: true,
 		agentDir,
-		env: { PI_APPROVAL_GUARDIAN_MODEL: "env/reviewer" },
+		env: {
+			PI_APPROVAL_GUARDIAN_MODEL: "env/reviewer",
+			PI_APPROVAL_GUARDIAN_FALLBACK_MODEL: "openrouter/openai/gpt-5-mini",
+		},
 	});
 	assert.equal(config.model, "env/reviewer");
+	assert.equal(config.fallbackModel, "openrouter/openai/gpt-5-mini");
+	assert.equal(config.fallbackModelSource, "environment");
 	assert.equal(config.timeoutMs, 60_000);
 	assert.equal(config.policy, "global policy\n\nproject policy");
 	assert.equal(config.review["bash.command"], "always");
 	assert.equal(config.review["read.path"], "private-only");
 	assert.equal(config.review["grep.path"], "outside-or-private");
-	assert.equal(config.projectConfigLoaded, true);
+	assert.equal(config.globalConfigPresent, true);
+	assert.equal(config.projectConfigPresent, true);
 });
 
 test("trusted project review rules cannot weaken the global floor", () => {
@@ -74,7 +83,12 @@ test("reports invalid configured policy instead of silently dropping it", () => 
 	mkdirSync(agentDir, { recursive: true });
 	writeFileSync(
 		join(agentDir, "approval-guardian.json"),
-		JSON.stringify({ policy: [], timeoutMs: 5, model: "" }),
+		JSON.stringify({
+			policy: [],
+			timeoutMs: 5,
+			model: "",
+			fallbackModel: "missing-slash",
+		}),
 	);
 	const config = loadGuardianConfig({
 		cwd: join(root, "project"),
@@ -82,8 +96,43 @@ test("reports invalid configured policy instead of silently dropping it", () => 
 		agentDir,
 		env: {},
 	});
-	assert.equal(config.warnings.length, 3);
+	assert.equal(config.warnings.length, 4);
 	assert.match(config.warnings.join("\n"), /Invalid policy/);
+	assert.match(config.warnings.join("\n"), /fallbackModel/);
+});
+
+test("accepts nested model IDs and reports config typos without rejecting custom path rules", () => {
+	const root = mkdtempSync(join(tmpdir(), "approval-guardian-"));
+	const agentDir = join(root, "agent");
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(
+		join(agentDir, "approval-guardian.json"),
+		JSON.stringify({
+			model: "openrouter/anthropic/claude-sonnet-4",
+			unknownSetting: true,
+			review: {
+				"custom-reader.path": "always",
+				"functions.reader.path": "outside-or-private",
+				"custom-reader.target": "off",
+			},
+		}),
+	);
+	const config = loadGuardianConfig({
+		cwd: join(root, "project"),
+		projectTrusted: false,
+		agentDir,
+		env: {},
+	});
+	assert.equal(config.model, "openrouter/anthropic/claude-sonnet-4");
+	assert.equal(config.modelSource, "global");
+	assert.equal(config.review["custom-reader.path"], "always");
+	assert.equal(config.review["functions.reader.path"], "outside-or-private");
+	assert.match(config.warnings.join("\n"), /unknownSetting/);
+	assert.match(config.warnings.join("\n"), /custom-reader.target/);
+	assert.deepEqual(parseModelSpec("openrouter/anthropic/claude-sonnet-4"), {
+		provider: "openrouter",
+		model: "anthropic/claude-sonnet-4",
+	});
 });
 
 test("reports invalid environment overrides", () => {
@@ -94,10 +143,23 @@ test("reports invalid environment overrides", () => {
 		agentDir: join(root, "agent"),
 		env: {
 			PI_APPROVAL_GUARDIAN_MODEL: "missing-slash",
+			PI_APPROVAL_GUARDIAN_FALLBACK_MODEL: "also-missing-slash",
 			PI_APPROVAL_GUARDIAN_TIMEOUT_MS: "5",
 		},
 	});
-	assert.equal(config.warnings.length, 2);
+	assert.equal(config.warnings.length, 3);
+});
+
+test("uses an environment model ID containing nested slashes", () => {
+	const root = mkdtempSync(join(tmpdir(), "approval-guardian-"));
+	const config = loadGuardianConfig({
+		cwd: join(root, "project"),
+		projectTrusted: false,
+		agentDir: join(root, "agent"),
+		env: { PI_APPROVAL_GUARDIAN_MODEL: "openrouter/anthropic/claude-sonnet-4" },
+	});
+	assert.equal(config.modelSource, "environment");
+	assert.equal(config.warnings.length, 0);
 });
 
 test("does not load project config for an untrusted project", () => {
@@ -121,6 +183,8 @@ test("does not load project config for an untrusted project", () => {
 		env: {},
 	});
 	assert.equal(config.model, "openai-codex/codex-auto-review");
+	assert.equal(config.fallbackModel, "openai-codex/codex-auto-review");
+	assert.equal(config.fallbackModelSource, "default");
 	assert.equal(config.policy, undefined);
 	assert.equal(config.review["read.path"], "private-only");
 	assert.equal(config.review["grep.path"], "always");
@@ -128,5 +192,5 @@ test("does not load project config for an untrusted project", () => {
 	assert.equal(config.review["ls.path"], "private-only");
 	assert.equal(config.review["hypa_read.path"], undefined);
 	assert.equal(config.review["write.path"], "outside-or-private");
-	assert.equal(config.projectConfigLoaded, false);
+	assert.equal(config.projectConfigPresent, true);
 });

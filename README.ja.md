@@ -90,9 +90,9 @@ Canonical path と symlink target を確認します。
 - Private-data authorization review は tools なし。
 - Reviewer に `bash`、`write`、`edit` を渡しません。
 - Transcript、file、tool output、planned action は untrusted evidence。
-- Shared deadline 内で invalid assessment と一部 transient provider failure を最大 3 attempts。
+- Reviewer channel ごとの shared deadline 内で invalid assessment と一部 transient provider failure を最大 3 attempts。
 
-3 consecutive explicit-denial batches、または最新 50 review batches 中 10 denial で circuit open。同じ assistant message の sibling tool calls は 1 batch として扱うため、同時 deny は 1 回だけ数えます。
+3 consecutive adverse batches、または最新 50 review batches 中 10 adverse batches で circuit open。Deny、timeout、failure は adverse、allow と cancel は対象外です。同じ assistant message の sibling tool calls は 1 batch として扱います。
 
 ## Optional configuration
 
@@ -103,12 +103,13 @@ Trusted project：`<project>/.pi/approval-guardian.json`
 ```json
 {
   "model": "openai-codex/codex-auto-review",
+  "fallbackModel": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "Exact authorization なしで production を変更しない。"
 }
 ```
 
-Pi model registry に登録・認証済みの custom reviewer channel も使用できます。
+Pi model registry に登録・認証済みの custom reviewer channel も使用できます。`fallbackModel` の default は公式 `openai-codex/codex-auto-review` です。別の primary が見つからない、利用可能な auth がない、failure、timeout の場合は fallback を試し、UI のみに短い通知を表示します。明示的 deny と cancel では fallback しません。
 
 Default review matrix：
 
@@ -134,11 +135,11 @@ Trusted project は global protection を強化のみ可能です：
 off < private-only < outside-or-private < always
 ```
 
-Environment variables：`PI_APPROVAL_GUARDIAN_MODEL`、`PI_APPROVAL_GUARDIAN_TIMEOUT_MS`、`PI_APPROVAL_GUARDIAN_POLICY`。
+Environment variables：`PI_APPROVAL_GUARDIAN_MODEL`、`PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`、`PI_APPROVAL_GUARDIAN_TIMEOUT_MS`、`PI_APPROVAL_GUARDIAN_POLICY`。
 
-Model/timeout precedence：`environment > trusted project > global > built-in default`。Policy は global、trusted project、environment の設定を加算します。
+Primary model/fallback model/timeout precedence：`environment > trusted project > global > built-in default`。Policy は global、trusted project、environment の設定を加算します。
 
-`/approval-guardian rules` で effective rules を確認できます。
+`/approval-guardian` で primary/fallback readiness と config source、`/approval-guardian rules` で effective rules を確認できます。
 
 ## Update / remove
 
@@ -152,11 +153,14 @@ pi update npm:pi-approval-guardian
 pi remove npm:pi-approval-guardian
 ```
 
-Project-local install：
+Project-local install / remove：
 
 ```bash
 pi install -l npm:pi-approval-guardian
+pi remove -l npm:pi-approval-guardian
 ```
+
+Remove 後に `/reload` を実行してください。
 
 Versioned npm spec は pin されます。Pin を進めるには新しい explicit version を install してください。
 
@@ -166,11 +170,12 @@ Versioned npm spec は pin されます。Pin を進めるには新しい explic
 - Reviewer decision は probabilistic です。
 - Reviewer provider は bounded transcript と planned-action metadata を受け取ります。
 - Authorized private read は main conversation で redaction されません。
-- Path rules は heuristic で、すべての renamed/indirect secret を検出できません。
-- Shell は完全な AST として解析されません。
+- Path classification は Pi 互換の `~`、`@`、`file://`、Unicode space normalization を先に適用しますが、rules は heuristic で、すべての renamed/indirect secret を検出できません。
+- Shell は完全な AST として解析されません。Guardian は common private target にだけ bounded glob matching を行うため、indirect read は漏れる可能性があります。
+- allow 後、Guardian は JSON-like tool input を検証して lock し、後続 `tool_call` handler の変更を防ぎます。Exotic runtime value は fail closed になります。commandPrefix、spawnHook、custom tool internal behavior、dispatch 後の filesystem は観測できません。
+- Pathless または nested-path custom tools、MCP、network、browser、email、deployment、subagent action は自動的にすべて保護されず、dedicated enforcement が必要です。
 - Filesystem state は review と execution の間に変化する可能性があります。
-- Pathless custom tools、MCP、network、browser、email、deployment、subagent action は自動的にすべて保護されるわけではありません。
-- Reviewer/provider unavailable 時は protected action を block します。
+- Primary と fallback の reviewer channel が両方 unavailable の場合、protected action は fail closed で block されます。
 
 詳細は [docs/REFERENCE.md](docs/REFERENCE.md) を参照してください。
 

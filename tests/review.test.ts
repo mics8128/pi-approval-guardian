@@ -28,7 +28,12 @@ test("parses the dedicated reviewer model", () => {
 		provider: "custom",
 		model: "guardian-v2",
 	});
+	assert.deepEqual(parseModelSpec("openrouter/anthropic/claude-sonnet-4"), {
+		provider: "openrouter",
+		model: "anthropic/claude-sonnet-4",
+	});
 	assert.equal(parseModelSpec("missing-provider"), undefined);
+	assert.equal(parseModelSpec("custom/model with spaces"), undefined);
 	assert.equal(DEFAULT_REVIEWER_MODEL, "openai-codex/codex-auto-review");
 });
 

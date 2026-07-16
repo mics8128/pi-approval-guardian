@@ -17,6 +17,7 @@ import {
 	sep,
 	win32,
 } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ReviewLevel } from "./config.ts";
 import type { GuardianAssessment } from "./review.ts";
 
@@ -33,20 +34,36 @@ export type GuardianReviewResult =
 	| { kind: "cancelled"; message: string }
 	| { kind: "circuit-open"; message: string };
 
+export function circuitOutcomeForReview(
+	result: GuardianReviewResult,
+): boolean | undefined {
+	if (result.kind === "allowed" || result.kind === "cancelled") return false;
+	if (
+		result.kind === "denied" ||
+		result.kind === "timeout" ||
+		result.kind === "failure"
+	) {
+		return true;
+	}
+	return undefined;
+}
+
 // Small state holder; the structural rule misclassifies its method span as a large class.
 // pi-lens-ignore: large-class
 export class DenialCircuitBreaker {
-	private consecutiveDenials = 0;
+	private consecutiveAdverseOutcomes = 0;
 	private recentReviews: boolean[] = [];
 
 	reset(): void {
-		this.consecutiveDenials = 0;
+		this.consecutiveAdverseOutcomes = 0;
 		this.recentReviews = [];
 	}
 
-	record(denied: boolean): boolean {
-		this.consecutiveDenials = denied ? this.consecutiveDenials + 1 : 0;
-		this.recentReviews.push(denied);
+	record(adverse: boolean): boolean {
+		this.consecutiveAdverseOutcomes = adverse
+			? this.consecutiveAdverseOutcomes + 1
+			: 0;
+		this.recentReviews.push(adverse);
 		if (this.recentReviews.length > AUTO_REVIEW_DENIAL_WINDOW_SIZE) {
 			this.recentReviews.shift();
 		}
@@ -54,35 +71,35 @@ export class DenialCircuitBreaker {
 	}
 
 	isOpen(): boolean {
-		const recentDenials = this.recentReviews.filter(Boolean).length;
+		const recentAdverseOutcomes = this.recentReviews.filter(Boolean).length;
 		return (
-			this.consecutiveDenials >= MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN ||
-			recentDenials >= MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN
+			this.consecutiveAdverseOutcomes >= MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN ||
+			recentAdverseOutcomes >= MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN
 		);
 	}
 }
 
 export class ReviewBatchTracker {
-	private batches = new Map<string, { reviewed: boolean; denied: boolean }>();
+	private batches = new Map<string, { reviewed: boolean; adverse: boolean }>();
 
 	reset(): void {
 		this.batches.clear();
 	}
 
-	record(batchId: string, denied: boolean): void {
+	record(batchId: string, adverse: boolean): void {
 		const state = this.batches.get(batchId) ?? {
 			reviewed: false,
-			denied: false,
+			adverse: false,
 		};
 		state.reviewed = true;
-		state.denied ||= denied;
+		state.adverse ||= adverse;
 		this.batches.set(batchId, state);
 	}
 
 	finish(batchId: string): boolean | undefined {
 		const state = this.batches.get(batchId);
 		this.batches.delete(batchId);
-		return state?.reviewed ? state.denied : undefined;
+		return state?.reviewed ? state.adverse : undefined;
 	}
 }
 
@@ -154,7 +171,6 @@ const PROJECT_PRIVATE_SEGMENTS = new Set([
 	"secrets",
 	"secret",
 	"credentials",
-	"private",
 ]);
 const EXTERNAL_PRIVATE_SEGMENTS = new Set([
 	".ssh",
@@ -353,15 +369,93 @@ export interface ReadReviewTarget {
 	reasons: string[];
 }
 
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/** Matches Pi's built-in path normalization without importing its internal modules. */
+export function resolveGuardianPath(
+	path: string,
+	cwd: string,
+): { absolutePath: string; projectRoot: string; windowsPath: boolean } {
+	const normalizedPath = normalizeGuardianPath(path);
+	const normalizedCwd = normalizeGuardianPath(cwd);
+	const windowsPath = isWindowsAbsolute(normalizedPath);
+	const windowsCwd = isWindowsAbsolute(normalizedCwd);
+	const absolutePath =
+		windowsPath && process.platform !== "win32"
+			? win32.normalize(normalizedPath).replace(/\\/g, "/")
+			: canonicalizePath(resolve(normalizedCwd, normalizedPath));
+	const projectRoot =
+		windowsCwd && process.platform !== "win32"
+			? win32.normalize(normalizedCwd).replace(/\\/g, "/")
+			: canonicalizePath(resolve(normalizedCwd));
+	return { absolutePath, projectRoot, windowsPath };
+}
+
+function normalizeGuardianPath(input: string): string {
+	let normalized = input.replace(UNICODE_SPACES, " ");
+	if (normalized.startsWith("@")) normalized = normalized.slice(1);
+	if (normalized === "~") return homedir();
+	if (
+		normalized.startsWith("~/") ||
+		(process.platform === "win32" && normalized.startsWith("~\\"))
+	) {
+		normalized = join(homedir(), normalized.slice(2));
+	}
+	return /^file:\/\//.test(normalized) ? fileURLToPath(normalized) : normalized;
+}
+
+function isWindowsAbsolute(path: string): boolean {
+	return /^[a-z]:[\\/]/i.test(path) || /^\\\\/.test(path);
+}
+
+function isNormalizedWindowsAbsolute(path: string): boolean {
+	return isWindowsAbsolute(path) || /^\/\/[^/]/.test(path);
+}
+
+function isOutsideProject(
+	absolutePath: string,
+	projectRoot: string,
+	windowsPath: boolean,
+): boolean {
+	if (windowsPath) {
+		if (!isNormalizedWindowsAbsolute(projectRoot)) return true;
+		const rel = win32.relative(projectRoot, absolutePath);
+		return (
+			rel === ".." ||
+			rel.startsWith("../") ||
+			rel.startsWith("..\\") ||
+			win32.isAbsolute(rel)
+		);
+	}
+	const rel = relative(projectRoot, absolutePath);
+	return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
+function isCredentialLikeBasename(file: string): boolean {
+	return (
+		file === "service-account" ||
+		/^service-account(?:[-_.][a-z0-9_-]+)?\.(?:json|ya?ml|pem|key)$/i.test(
+			file,
+		) ||
+		/^passwords?(?:(?:[-_.](?:store|vault|secret|secrets|credential|credentials|token|tokens|hash|hashes))(?:\.(?:json|ya?ml|txt|csv|db))?|\.(?:json|ya?ml|txt|csv|db))?$/i.test(
+			file,
+		)
+	);
+}
+
 export function classifyMutationPath(
 	path: string,
 	cwd: string,
 ): MutationReviewTarget {
-	const absolutePath = canonicalizePath(resolve(cwd, path));
-	const projectRoot = canonicalizePath(resolve(cwd));
-	const rel = relative(projectRoot, absolutePath);
-	const outsideProject =
-		rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+	const { absolutePath, projectRoot, windowsPath } = resolveGuardianPath(
+		path,
+		cwd,
+	);
+	const outsideProject = isOutsideProject(
+		absolutePath,
+		projectRoot,
+		windowsPath,
+	);
 	const normalizedSegments = absolutePath.split(/[\\/]+/).filter(Boolean);
 	const file = basename(absolutePath).toLowerCase();
 	const privatePath = classifyReadPath(path, cwd).private;
@@ -398,33 +492,15 @@ export function shouldReviewMutation(path: string, cwd: string): boolean {
 // The branches deliberately mirror independent blacklist categories for auditability.
 // pi-lens-ignore: high-complexity
 export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
-	const windowsAbsolute = /^[a-z]:[\\/]/i.test(path) || /^\\\\/.test(path);
-	const windowsCwd = /^[a-z]:[\\/]/i.test(cwd) || /^\\\\/.test(cwd);
-	const nativeWindowsPath = process.platform === "win32" && windowsAbsolute;
-	const absolutePath = nativeWindowsPath
-		? canonicalizePath(resolve(cwd, path))
-		: windowsAbsolute
-			? win32.normalize(path).replace(/\\/g, "/")
-			: canonicalizePath(resolve(cwd, path));
-	const projectRoot = process.platform === "win32" && windowsCwd
-		? canonicalizePath(resolve(cwd))
-		: windowsCwd
-			? win32.normalize(cwd).replace(/\\/g, "/")
-			: canonicalizePath(resolve(cwd));
-	let rel: string;
-	if (windowsAbsolute && windowsCwd) {
-		rel = win32.relative(projectRoot, absolutePath);
-	} else if (windowsAbsolute) {
-		rel = "..";
-	} else {
-		rel = relative(projectRoot, absolutePath);
-	}
-	const outsideProject = windowsAbsolute
-		? rel === ".." ||
-			rel.startsWith("../") ||
-			rel.startsWith("..\\") ||
-			win32.isAbsolute(rel)
-		: rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+	const { absolutePath, projectRoot, windowsPath } = resolveGuardianPath(
+		path,
+		cwd,
+	);
+	const outsideProject = isOutsideProject(
+		absolutePath,
+		projectRoot,
+		windowsPath,
+	);
 	const normalizedSegments = absolutePath
 		.split(/[\\/]+/)
 		.filter(Boolean)
@@ -434,8 +510,7 @@ export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 	const privateBasename =
 		PRIVATE_READ_BASENAMES.has(file) ||
 		file.startsWith(".env.") ||
-		file.startsWith("service-account") ||
-		file.startsWith("password") ||
+		isCredentialLikeBasename(file) ||
 		file.endsWith(".secret") ||
 		file.endsWith(".secrets") ||
 		PRIVATE_READ_SUFFIXES.some((suffix) => file.endsWith(suffix));
