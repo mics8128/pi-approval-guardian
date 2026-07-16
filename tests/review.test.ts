@@ -1,3 +1,4 @@
+// pi-lens-ignore: find-import-file-without-extension
 import assert from "node:assert/strict";
 import test from "node:test";
 import { UPSTREAM_GUARDIAN_COMMIT } from "../src/policy.ts";
@@ -82,9 +83,14 @@ test("uses the current Guardian policy and read-only investigation rules", () =>
 		GUARDIAN_POLICY,
 		/Post-denial user approval has highest precedence/,
 	);
+	assert.match(GUARDIAN_POLICY, /Private Data Access and Credential Probing/);
 	assert.match(
 		GUARDIAN_POLICY,
-		/Directly reading auth files into shell-visible variables/,
+		/requires explicit user authorization for that data source/,
+	);
+	assert.match(
+		GUARDIAN_POLICY,
+		/A general request to inspect, debug, configure, deploy, authenticate, or finish a project does not by itself authorize/,
 	);
 });
 

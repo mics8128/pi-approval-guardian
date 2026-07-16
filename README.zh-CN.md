@@ -50,7 +50,7 @@ pi install -l npm:pi-approval-guardian
 
 ```json
 {
-  "model": "llm-esapp/codex-auto-review",
+  "model": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "未经用户明确批准确切目标和副作用，不得修改生产环境。"
 }

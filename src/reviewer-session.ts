@@ -1,3 +1,4 @@
+// pi-lens-ignore: find-import-file-without-extension
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import {
 	DefaultResourceLoader,
@@ -7,6 +8,7 @@ import {
 	getAgentDir,
 	type ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
+// pi-lens-ignore: find-import-file-without-extension
 import {
 	GUARDIAN_REVIEW_MAX_ATTEMPTS,
 	type GuardianReviewResult,
@@ -20,7 +22,31 @@ import {
 } from "./review.ts";
 
 export type ReviewerModel = NonNullable<ReturnType<ModelRegistry["find"]>>;
+export const OFFICIAL_AUTO_REVIEW_MODEL = "openai-codex/codex-auto-review";
+
 type AgentSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
+
+export function resolveReviewerModel(
+	registry: ModelRegistry,
+	provider: string,
+	model: string,
+): ReviewerModel | undefined {
+	const registered = registry.find(provider, model);
+	if (registered) return registered;
+	if (provider !== "openai-codex" || model !== "codex-auto-review") return;
+
+	const template =
+		registry.find("openai-codex", "gpt-5.4-mini") ??
+		registry.find("openai-codex", "gpt-5.4");
+	if (!template) return;
+	return {
+		...template,
+		id: "codex-auto-review",
+		name: "Codex Auto Review",
+		contextWindow: 272_000,
+		maxTokens: 10_000,
+	};
+}
 
 export interface ReviewerSessionOptions {
 	model: ReviewerModel;
@@ -30,7 +56,10 @@ export interface ReviewerSessionOptions {
 	timeoutMs: number;
 }
 
+// Session lifecycle, retry, deadline, and transcript cursor state are cohesive here.
+// pi-lens-ignore: large-class
 export class ReviewerSessionController {
+	// pi-lens-ignore: large-class
 	private session?: AgentSession;
 	private cursor = 0;
 	private deliveredPrefix = "";
@@ -372,9 +401,13 @@ function latestAssistantOutcome(session: AgentSession): {
 	error?: string;
 	retryable?: boolean;
 } {
-	const message = [...session.messages]
-		.reverse()
-		.find((candidate) => candidate.role === "assistant");
+	let message: AgentSession["messages"][number] | undefined;
+	for (let index = session.messages.length - 1; index >= 0; index--) {
+		const candidate = session.messages[index];
+		if (candidate.role !== "assistant") continue;
+		message = candidate;
+		break;
+	}
 	if (!message || message.role !== "assistant") return {};
 	if (message.stopReason === "error") {
 		return {

@@ -27,9 +27,9 @@ Crea `~/.pi/agent/approval-guardian.json`:
 
 ```json
 {
-  "model": "llm-esapp/codex-auto-review",
+  "model": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
-  "policy": "No modificar producción sin aprobación explícita del objetivo exacto y sus efectos secundarios."
+  "policy": "No modificar producción sin aprobación explícita."
 }
 ```
 

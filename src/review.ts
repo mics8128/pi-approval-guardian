@@ -166,20 +166,22 @@ export function parseGuardianAssessment(text: string): GuardianAssessment {
 	if (payload.outcome !== "allow" && payload.outcome !== "deny") {
 		throw new Error("reviewer response did not contain a valid outcome");
 	}
-	const risk = isRisk(payload.risk_level)
-		? payload.risk_level
-		: payload.outcome === "allow"
-			? "low"
-			: "high";
-	const authorization = isAuthorization(payload.user_authorization)
-		? payload.user_authorization
-		: "unknown";
-	const rationale =
-		typeof payload.rationale === "string" && payload.rationale.trim()
-			? payload.rationale.trim()
-			: payload.outcome === "allow"
-				? "Auto-review returned a low-risk allow decision."
-				: "Auto-review denied the action without a rationale.";
+	let risk: RiskLevel;
+	if (isRisk(payload.risk_level)) risk = payload.risk_level;
+	else if (payload.outcome === "allow") risk = "low";
+	else risk = "high";
+	let authorization: UserAuthorization = "unknown";
+	if (isAuthorization(payload.user_authorization)) {
+		authorization = payload.user_authorization;
+	}
+	let rationale: string;
+	if (typeof payload.rationale === "string" && payload.rationale.trim()) {
+		rationale = payload.rationale.trim();
+	} else if (payload.outcome === "allow") {
+		rationale = "Auto-review returned a low-risk allow decision.";
+	} else {
+		rationale = "Auto-review denied the action without a rationale.";
+	}
 	return {
 		risk_level: risk,
 		user_authorization: authorization,

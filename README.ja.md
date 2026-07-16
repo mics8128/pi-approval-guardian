@@ -27,7 +27,7 @@ pi install npm:pi-approval-guardian
 
 ```json
 {
-  "model": "llm-esapp/codex-auto-review",
+  "model": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "本番環境の変更は、対象と副作用について明示的な承認がある場合のみ許可する。"
 }

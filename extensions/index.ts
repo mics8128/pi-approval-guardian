@@ -1,3 +1,4 @@
+// pi-lens-ignore: find-import-file-without-extension
 import {
 	isToolCallEventType,
 	type ExtensionAPI,
@@ -8,6 +9,7 @@ import { loadGuardianConfig } from "../src/config.ts";
 import {
 	DenialCircuitBreaker,
 	classifyMutationPath,
+	classifyReadPath,
 	type GuardianReviewResult,
 } from "../src/gate.ts";
 import { buildGuardianSystemPrompt } from "../src/policy.ts";
@@ -17,8 +19,13 @@ import {
 	type GuardianAssessment,
 	type GuardianMessage,
 } from "../src/review.ts";
-import { ReviewerSessionController } from "../src/reviewer-session.ts";
+import {
+	ReviewerSessionController,
+	resolveReviewerModel,
+} from "../src/reviewer-session.ts";
 
+// Extension wiring intentionally coordinates lifecycle, UI, policy, and reviewer state.
+// pi-lens-ignore: high-complexity, high-fan-out
 export default function approvalGuardian(pi: ExtensionAPI) {
 	let activeReviews = 0;
 	let controller: ReviewerSessionController | undefined;
@@ -42,36 +49,94 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		circuitBreaker.reset();
 	});
 
-	const showConfiguration = async (
-		_args: string,
+	const showConfiguration = (
+		args: string,
 		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
-	) => {
+	): Promise<void> => {
 		const config = loadGuardianConfig({
 			cwd: ctx.cwd,
 			projectTrusted: ctx.isProjectTrusted(),
 		});
 		const parsed = parseModelSpec(config.model);
 		const model = parsed
-			? ctx.modelRegistry.find(parsed.provider, parsed.model)
+			? resolveReviewerModel(ctx.modelRegistry, parsed.provider, parsed.model)
 			: undefined;
 		const ready = Boolean(model) && config.warnings.length === 0;
+		const details =
+			args.trim() === "rules"
+				? [
+						"Review rules (tool.parameter → level):",
+						"bash.command → model review",
+						"read.path → explicit user confirmation for blacklisted private paths; otherwise off",
+						"write.path → model review for sensitive or out-of-project paths; otherwise off",
+						"edit.path → model review for sensitive or out-of-project paths; otherwise off",
+						"All other tools/parameters → off",
+					]
+				: [
+						"Reviews every agent bash action, blacklisted private reads, and sensitive/out-of-project writes or edits before execution.",
+						"Run /approval-guardian rules for the tool/parameter review matrix.",
+					];
 		ctx.ui.notify(
 			[
 				`Approval Guardian · ${ready ? "ready" : "needs attention"} · fail-closed`,
 				`${config.model} · ${formatDuration(config.timeoutMs)} deadline · up to 3 attempts · policy ${config.policy ? "customized" : "default"}`,
-				"Reviews every agent bash action and sensitive/out-of-project write or edit before execution.",
+				...details,
 				...config.warnings,
 			].join("\n"),
 			ready ? "info" : "warning",
 		);
+		return Promise.resolve();
 	};
 
 	pi.registerCommand("approval-guardian", {
-		description: "Show the automatic approval guardian configuration",
+		description: "Show Guardian status or the tool/parameter review rules",
+		getArgumentCompletions: (prefix) =>
+			"rules".startsWith(prefix)
+				? [
+						{
+							value: "rules",
+							label: "rules",
+							description: "Show review levels",
+						},
+					]
+				: null,
 		handler: showConfiguration,
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		const readPath = readPathFromToolCall(event);
+		if (readPath) {
+			const target = classifyReadPath(readPath, ctx.cwd);
+			if (target.private) {
+				if (!ctx.hasUI) {
+					return {
+						block: true,
+						reason: `Reading private path ${target.absolutePath} requires explicit user confirmation, but no interactive approval UI is available.`,
+					};
+				}
+				const approved = await ctx.ui.confirm(
+					"Approval Guardian · private read",
+					[
+						`Allow the agent to read this path?`,
+						target.absolutePath,
+						`Reason: ${target.reasons.join(", ")}`,
+						"The file contents will enter the agent conversation context.",
+					].join("\n"),
+				);
+				if (!approved) {
+					return {
+						block: true,
+						reason: `User did not explicitly authorize reading private path ${target.absolutePath}.`,
+					};
+				}
+				ctx.ui.notify(
+					`Approval Guardian · explicitly allowed private read\n${target.absolutePath}`,
+					"warning",
+				);
+				return;
+			}
+		}
+
 		const action = actionFromToolCall(event, ctx.cwd);
 		if (!action) return;
 
@@ -123,7 +188,11 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 					message: `Invalid reviewer model ${config.model}; expected provider/model.`,
 				};
 			}
-			const model = ctx.modelRegistry.find(spec.provider, spec.model);
+			const model = resolveReviewerModel(
+				ctx.modelRegistry,
+				spec.provider,
+				spec.model,
+			);
 			if (!model) {
 				return {
 					kind: "failure",
@@ -170,6 +239,13 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			);
 		}
 	}
+}
+
+function readPathFromToolCall(event: ToolCallEvent): string | undefined {
+	if (isToolCallEventType("read", event)) return event.input.path;
+	if (event.toolName !== "hypa_read") return;
+	const input = event.input as { path?: unknown };
+	return typeof input.path === "string" ? input.path : undefined;
 }
 
 function actionFromToolCall(
@@ -233,6 +309,8 @@ function rejectionReason(
 			return "Automatic permission review was cancelled, so approval was not granted.";
 		case "circuit-open":
 			return "Repeated automatic-review denials reached the per-turn safety limit. Stop trying alternate commands and ask the user for guidance.";
+		default:
+			return "Automatic permission review failed closed with an unknown result.";
 	}
 }
 
@@ -258,6 +336,8 @@ function formatReviewResult(
 			return `Guardian · cancelled · blocked\n${target}`;
 		case "circuit-open":
 			return `Guardian · circuit open · blocked\n${target}`;
+		default:
+			return `Guardian · unknown result · blocked\n${target}`;
 	}
 }
 

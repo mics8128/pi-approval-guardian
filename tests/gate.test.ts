@@ -1,3 +1,4 @@
+// pi-lens-ignore: find-import-file-without-extension
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +10,8 @@ import {
 	MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN,
 	MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN,
 	classifyMutationPath,
+	classifyReadPath,
+	requiresExplicitReadAuthorization,
 	shouldReviewMutation,
 } from "../src/gate.ts";
 
@@ -64,6 +67,57 @@ test("detects a dangling file symlink that writes outside the project", () => {
 	assert.equal(
 		target.absolutePath,
 		join(realpathSync(outside), "new-file.txt"),
+	);
+});
+
+test("requires explicit authorization for project-private reads", () => {
+	for (const path of [
+		".env",
+		".env.local",
+		"config/service-account-prod.json",
+		"secrets/token.txt",
+		"credentials/deploy.json",
+		"certs/client.pem",
+		"certs/client.key",
+	]) {
+		assert.equal(
+			requiresExplicitReadAuthorization(path, "/repo/project"),
+			true,
+			path,
+		);
+	}
+	for (const path of ["README.md", "src/config.ts", "package.json"]) {
+		assert.equal(
+			requiresExplicitReadAuthorization(path, "/repo/project"),
+			false,
+			path,
+		);
+	}
+});
+
+test("requires explicit authorization for common external private directories", () => {
+	for (const path of [
+		"/Users/test/.ssh/config",
+		"/Users/test/.gnupg/private-keys-v1.d/key",
+		"/Users/test/.aws/credentials",
+		"/Users/test/.azure/accessTokens.json",
+		"/Users/test/.kube/config",
+		"/Users/test/.docker/config.json",
+		"/Users/test/.pi/agent/auth.json",
+		"/Users/test/.config/gcloud/application_default_credentials.json",
+		"/Users/test/.config/gh/hosts.yml",
+		"/Users/test/Library/Keychains/login.keychain-db",
+	]) {
+		const target = classifyReadPath(path, "/repo/project");
+		assert.equal(target.private, true, path);
+		assert.equal(target.outsideProject, true, path);
+	}
+	assert.equal(
+		requiresExplicitReadAuthorization(
+			"/Users/test/Documents/notes.txt",
+			"/repo/project",
+		),
+		false,
 	);
 });
 

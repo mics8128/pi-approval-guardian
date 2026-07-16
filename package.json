@@ -1,6 +1,6 @@
 {
   "name": "pi-approval-guardian",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A fail-closed approval gate for Pi that reviews agent shell actions and sensitive file mutations with an isolated risk model.",
   "type": "module",
   "keywords": [
@@ -41,18 +41,20 @@
       "./extensions/index.ts"
     ]
   },
+  "knip": {
+    "entry": [
+      "extensions/index.ts",
+      "tests/*.test.ts"
+    ]
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.80.7",
     "@earendil-works/pi-coding-agent": "^0.80.7",
-    "@earendil-works/pi-tui": "^0.80.7",
     "@types/node": "^24.12.0",
-    "typebox": "^1.1.38",
     "typescript": "^5.9.3"
   },
   "scripts": {
