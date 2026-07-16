@@ -105,7 +105,10 @@ test("honors always rules when an optional path is omitted or empty", () => {
 		{ ...DEFAULT_REVIEW_RULES, "find.path": "always" },
 	);
 	assert.equal(action?.tool, "find");
-	assert.match(String(action?.payload.path), /repo\/project/);
+	assert.match(
+		String(action?.payload.path).replace(/\\/g, "/"),
+		/repo\/project/,
+	);
 	const emptyPath = actionFromToolCall(
 		event("ls", { path: "" }),
 		"/repo/project",
