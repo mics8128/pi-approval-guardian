@@ -35,13 +35,13 @@ Default setup에는 설정 파일이 필요하지 않습니다.
 | Tool/action | Default scope |
 | --- | --- |
 | `bash.command` | 항상 검토 |
-| `grep.path` | broad/pathless search를 포함해 항상 검토 |
+| `grep.path` | 프로젝트 외부이거나 path/pattern/glob/effective scope가 private data를 노출할 수 있을 때 검토 |
 | `read.path` | 알려진 private data |
 | `find.path` / `ls.path` | 알려진 private path |
 | `write.path` / `edit.path` | 프로젝트 외부 또는 private/sensitive path |
 | 문자열 `path`를 가진 다른 tool | 기본 `private-only` |
 
-일반적인 프로젝트 내부 source edit는 reviewer 지연 없이 실행됩니다. 사용자가 직접 입력한 `!`/`!!`, 다른 terminal, 다른 process는 가로채지 않습니다.
+일반적인 clean 프로젝트 내부 source edit와 search는 reviewer 지연 없이 실행됩니다. 사용자가 직접 입력한 `!`/`!!`, 다른 terminal, 다른 process는 가로채지 않습니다.
 
 ## 작동 방식
 
@@ -85,7 +85,7 @@ Canonical path와 symlink target을 확인합니다.
 
 ## Reviewer behavior
 
-- 메인 대화와 분리된 model/in-memory session.
+- Reviewer state는 독립된 in-memory session을 사용합니다. 마지막 fallback은 main session의 model identity를 사용할 수 있지만 conversation state는 재사용하지 않습니다.
 - Normal review는 `read`, `grep`, `find`, `ls`만 제공.
 - Private-data authorization review는 tools 없음.
 - Reviewer에 `bash`, `write`, `edit`를 제공하지 않음.
@@ -109,7 +109,7 @@ Trusted project: `<project>/.pi/approval-guardian.json`
 }
 ```
 
-Pi model registry에 등록되고 인증된 custom reviewer channel도 사용할 수 있습니다. `fallbackModel`의 기본값은 공식 `openai-codex/codex-auto-review`입니다. 별도 primary를 찾을 수 없거나 usable auth가 없거나 failure/timeout이 발생하면 fallback을 시도하고 UI에만 짧은 알림을 표시합니다. 명시적 deny와 cancel은 fallback을 트리거하지 않습니다.
+Pi model registry에 등록되고 인증된 custom reviewer channel도 사용할 수 있습니다. 중복 model을 제거한 뒤 Guardian은 primary, 설정된 `fallbackModel`, 마지막으로 현재 Pi session model 순서로 시도합니다. model/auth unavailable 또는 명시적 failure일 때만 다음 channel로 진행합니다. Timeout은 해당 action의 terminal fail-closed result이며 다른 channel을 시도하지 않습니다. Allow, 명시적 deny, cancel도 즉시 중단합니다. 각 channel은 독립적으로 incremental reuse되는 reviewer session을 사용하고 전환 알림은 UI에만 표시됩니다.
 
 Default review matrix:
 
@@ -117,7 +117,7 @@ Default review matrix:
 {
   "review": {
     "bash.command": "always",
-    "grep.path": "always",
+    "grep.path": "outside-or-private",
     "read.path": "private-only",
     "find.path": "private-only",
     "ls.path": "private-only",
@@ -135,11 +135,13 @@ Trusted project는 global protection을 강화만 할 수 있습니다:
 off < private-only < outside-or-private < always
 ```
 
+Default에서는 agent의 모든 `bash`를 review합니다. 일반 project 내부 `grep`은 path, selector, effective scope가 private data를 포함하지 않으면 reviewer latency를 추가하지 않습니다. 더 엄격한 profile에서는 `grep.path`를 `always`로 설정할 수 있습니다. 동등한 shell gate 또는 sandbox가 없다면 `bash.command` 비활성화는 권장하지 않습니다.
+
 Environment variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`, `PI_APPROVAL_GUARDIAN_TIMEOUT_MS`, `PI_APPROVAL_GUARDIAN_POLICY`.
 
 Primary model/fallback model/timeout precedence: `environment > trusted project > global > built-in default`. Policy는 global, trusted project, environment 설정을 합산합니다.
 
-`/approval-guardian`으로 primary/fallback readiness와 config source를, `/approval-guardian rules`로 effective rules를 확인할 수 있습니다.
+`/approval-guardian`으로 primary, configured fallback, current-model fallback의 readiness와 config source를, `/approval-guardian rules`로 effective rules를 확인할 수 있습니다.
 
 ## 업데이트 / 제거
 
@@ -175,7 +177,7 @@ Versioned npm spec은 pin됩니다. Pin을 변경하려면 새로운 explicit ve
 - allow 후 Guardian은 JSON-like tool input을 검증하고 lock하여 이후 `tool_call` handler 변경을 막습니다. Exotic runtime value는 fail closed 처리됩니다. commandPrefix, spawnHook, custom tool internal behavior, dispatch 후 filesystem은 관찰하지 못합니다.
 - Pathless 또는 nested-path custom tools, MCP, network, browser, email, deployment, subagent action은 자동으로 모두 보호되지 않으며 dedicated enforcement가 필요합니다.
 - Filesystem state는 review와 execution 사이에 변경될 수 있습니다.
-- Primary와 fallback reviewer channel을 모두 사용할 수 없으면 protected action은 fail closed로 block됩니다.
+- Primary, configured fallback, distinct current-model fallback을 모두 사용할 수 없으면 protected action은 fail closed로 block됩니다.
 
 전체 기술 설명: [docs/REFERENCE.md](docs/REFERENCE.md)
 

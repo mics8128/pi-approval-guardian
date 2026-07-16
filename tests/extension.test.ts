@@ -11,8 +11,9 @@ import approvalGuardian, {
 	lockAllowedToolInput,
 	lockReviewedToolInput,
 	reviewerToolsForAction,
-	runReviewWithFallback,
+	runReviewWithFallbackChain,
 	shouldFallbackReview,
+	type ReviewerChannel,
 	toolCallBatchInfo,
 } from "../extensions/index.ts";
 import { DEFAULT_REVIEW_RULES, loadGuardianConfig } from "../src/config.ts";
@@ -21,6 +22,13 @@ import { ReviewerSessionController } from "../src/reviewer-session.ts";
 
 function event(toolName: string, input: Record<string, unknown>): ToolCallEvent {
 	return { toolName, input, toolCallId: "test" } as unknown as ToolCallEvent;
+}
+
+function channel(
+	role: ReviewerChannel["role"],
+	modelSpec: string,
+): ReviewerChannel {
+	return { role, modelSpec };
 }
 
 test("routes private read and grep paths to the reviewer", () => {
@@ -64,6 +72,17 @@ test("routes private read and grep paths to the reviewer", () => {
 		);
 		assert.equal(broadGlob?.payload.private_data_read, true, glob);
 	}
+
+	const cleanProject = mkdtempSync(join(tmpdir(), "guardian-clean-grep-"));
+	writeFileSync(join(cleanProject, "app.ts"), "export const token = true;");
+	assert.equal(
+		actionFromToolCall(
+			event("grep", { path: ".", pattern: "token" }),
+			cleanProject,
+			{ ...DEFAULT_REVIEW_RULES },
+		),
+		undefined,
+	);
 });
 
 test("defaults unconfigured path-based tools to private-only", () => {
@@ -270,7 +289,7 @@ test("honors always rules when an optional path is omitted or empty", () => {
 	assert.equal(emptyPath?.tool, "ls");
 });
 
-test("falls back only for reviewer failure or timeout", () => {
+test("falls back only for reviewer failure", () => {
 	const assessment = {
 		risk_level: "low" as const,
 		user_authorization: "unknown" as const,
@@ -278,7 +297,10 @@ test("falls back only for reviewer failure or timeout", () => {
 		rationale: "",
 	};
 	assert.equal(shouldFallbackReview({ kind: "failure", message: "failed" }), true);
-	assert.equal(shouldFallbackReview({ kind: "timeout", message: "timed out" }), true);
+	assert.equal(
+		shouldFallbackReview({ kind: "timeout", message: "timed out" }),
+		false,
+	);
 	assert.equal(shouldFallbackReview({ kind: "allowed", assessment }), false);
 	assert.equal(
 		shouldFallbackReview({
@@ -293,82 +315,102 @@ test("falls back only for reviewer failure or timeout", () => {
 	);
 });
 
-test("runs the fallback channel only after primary failure", async () => {
+test("runs configured and current-model fallbacks in order", async () => {
+	const channels = [
+		channel("primary", "custom/reviewer"),
+		channel("configured-fallback", "openai-codex/codex-auto-review"),
+		channel("current-model", "anthropic/current-model"),
+	];
 	const calls: string[] = [];
-	let notices = 0;
+	const switches: string[] = [];
 	const assessment = {
 		risk_level: "low" as const,
 		user_authorization: "unknown" as const,
 		outcome: "allow" as const,
 		rationale: "",
 	};
-	const recovered = await runReviewWithFallback(
+	const recovered = await runReviewWithFallbackChain(
+		channels,
+		async (reviewer) => {
+			calls.push(reviewer.modelSpec);
+			return reviewer.role === "current-model"
+				? { kind: "allowed", assessment }
+				: { kind: "failure", message: `${reviewer.role} unavailable` };
+		},
+		(from, to) => switches.push(`${from.role}→${to.role}`),
+	);
+	assert.deepEqual(calls, [
 		"custom/reviewer",
 		"openai-codex/codex-auto-review",
-		async (model) => {
-			calls.push(model);
-			return model === "custom/reviewer"
-				? { kind: "failure", message: "unavailable" }
-				: { kind: "allowed", assessment };
+		"anthropic/current-model",
+	]);
+	assert.deepEqual(switches, [
+		"primary→configured-fallback",
+		"configured-fallback→current-model",
+	]);
+	assert.equal(recovered.finalChannel.role, "current-model");
+	assert.equal(recovered.result.kind, "allowed");
+
+	calls.length = 0;
+	const denied = await runReviewWithFallbackChain(
+		channels,
+		async (reviewer) => {
+			calls.push(reviewer.modelSpec);
+			return reviewer.role === "primary"
+				? { kind: "failure", message: "primary failed" }
+				: {
+						kind: "denied",
+						assessment: { ...assessment, outcome: "deny" },
+					};
 		},
-		() => notices++,
+		() => undefined,
 	);
 	assert.deepEqual(calls, [
 		"custom/reviewer",
 		"openai-codex/codex-auto-review",
 	]);
-	assert.equal(notices, 1);
-	assert.equal(recovered.usedFallback, true);
-	assert.equal(recovered.primaryResult.kind, "failure");
-	assert.equal(recovered.result.kind, "allowed");
+	assert.equal(denied.finalChannel.role, "configured-fallback");
+	assert.equal(denied.result.kind, "denied");
+
+	const timedOut = await runReviewWithFallbackChain(
+		channels,
+		async (reviewer) =>
+			reviewer.role === "current-model"
+				? { kind: "timeout", message: "current model timed out" }
+				: { kind: "failure", message: `${reviewer.role} failed` },
+		() => undefined,
+	);
+	assert.equal(timedOut.attempts.length, 3);
+	assert.equal(timedOut.result.kind, "timeout");
 
 	calls.length = 0;
-	const denied = await runReviewWithFallback(
-		"custom/reviewer",
-		"openai-codex/codex-auto-review",
-		async (model) => {
-			calls.push(model);
-			return {
-				kind: "denied",
-				assessment: { ...assessment, outcome: "deny" },
-			};
+	switches.length = 0;
+	const primaryTimeout = await runReviewWithFallbackChain(
+		channels,
+		async (reviewer) => {
+			calls.push(reviewer.modelSpec);
+			return { kind: "timeout", message: "review timed out" };
 		},
-		() => notices++,
+		(from, to) => switches.push(`${from.role}→${to.role}`),
 	);
 	assert.deepEqual(calls, ["custom/reviewer"]);
-	assert.equal(notices, 1);
-	assert.equal(denied.usedFallback, false);
-
-	const bothFailed = await runReviewWithFallback(
-		"custom/reviewer",
-		"openai-codex/codex-auto-review",
-		async (model) => ({ kind: "failure", message: `${model} failed` }),
-		() => notices++,
-	);
-	assert.equal(bothFailed.usedFallback, true);
-	assert.equal(bothFailed.primaryResult.kind, "failure");
-	assert.equal(bothFailed.result.kind, "failure");
-
-	const fallbackTimedOut = await runReviewWithFallback(
-		"custom/reviewer",
-		"openai-codex/codex-auto-review",
-		async (model) =>
-			model === "custom/reviewer"
-				? { kind: "failure", message: "primary failed" }
-				: { kind: "timeout", message: "fallback timed out" },
-		() => notices++,
-	);
-	assert.equal(fallbackTimedOut.usedFallback, true);
-	assert.equal(fallbackTimedOut.result.kind, "timeout");
+	assert.deepEqual(switches, []);
+	assert.equal(primaryTimeout.attempts.length, 1);
+	assert.equal(primaryTimeout.result.kind, "timeout");
 });
 
-test("keeps success, denial, cancellation, and identical models on the primary channel", async () => {
+test("keeps terminal primary results on one channel and deduplicates models", async () => {
 	const assessment = {
 		risk_level: "low" as const,
 		user_authorization: "unknown" as const,
 		outcome: "allow" as const,
 		rationale: "",
 	};
+	const channels = [
+		channel("primary", "custom/reviewer"),
+		channel("configured-fallback", "openai-codex/codex-auto-review"),
+		channel("current-model", "anthropic/current-model"),
+	];
 	for (const primaryResult of [
 		{ kind: "allowed", assessment } as const,
 		{
@@ -378,32 +420,34 @@ test("keeps success, denial, cancellation, and identical models on the primary c
 		{ kind: "cancelled", message: "cancelled" } as const,
 	]) {
 		const calls: string[] = [];
-		const result = await runReviewWithFallback(
-			"custom/reviewer",
-			"openai-codex/codex-auto-review",
-			async (model) => {
-				calls.push(model);
+		const result = await runReviewWithFallbackChain(
+			channels,
+			async (reviewer) => {
+				calls.push(reviewer.modelSpec);
 				return primaryResult;
 			},
 			() => assert.fail("fallback must not run"),
 		);
 		assert.deepEqual(calls, ["custom/reviewer"]);
-		assert.equal(result.usedFallback, false);
+		assert.equal(result.attempts.length, 1);
 		assert.equal(result.result.kind, primaryResult.kind);
 	}
 
 	const calls: string[] = [];
-	const identical = await runReviewWithFallback(
-		"custom/reviewer",
-		"custom/reviewer",
-		async (model) => {
-			calls.push(model);
+	const identical = await runReviewWithFallbackChain(
+		[
+			channel("primary", "custom/reviewer"),
+			channel("configured-fallback", "custom/reviewer"),
+			channel("current-model", "custom/reviewer"),
+		],
+		async (reviewer) => {
+			calls.push(reviewer.modelSpec);
 			return { kind: "failure", message: "unavailable" };
 		},
-		() => assert.fail("identical fallback must not run"),
+		() => assert.fail("duplicate fallback must not run"),
 	);
 	assert.deepEqual(calls, ["custom/reviewer"]);
-	assert.equal(identical.usedFallback, false);
+	assert.equal(identical.attempts.length, 1);
 });
 
 test("wires primary failure through fallback and keeps fallback diagnostics UI-only", async () => {
@@ -423,8 +467,9 @@ test("wires primary failure through fallback and keeps fallback diagnostics UI-o
 	process.env.PI_APPROVAL_GUARDIAN_MODEL = "custom/reviewer";
 	process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL =
 		"openai-codex/codex-auto-review";
-	let mode: "recover" | "fail" = "recover";
+	let mode: "recover" | "fail" | "timeout" = "recover";
 	const reviewCalls: string[] = [];
+	const controllerInstances = new Map<string, Set<object>>();
 	ReviewerSessionController.prototype.review = async function (
 		this: ReviewerSessionController,
 	) {
@@ -435,8 +480,17 @@ test("wires primary failure through fallback and keeps fallback diagnostics UI-o
 		).options;
 		const model = `${options.model.provider}/${options.model.id}`;
 		reviewCalls.push(model);
+		const instances = controllerInstances.get(model) ?? new Set<object>();
+		instances.add(this);
+		controllerInstances.set(model, instances);
+		if (mode === "timeout") {
+			return { kind: "timeout", message: "review timed out" };
+		}
 		if (model === "custom/reviewer") {
 			return { kind: "failure", message: "primary channel failed" };
+		}
+		if (model === "openai-codex/codex-auto-review") {
+			return { kind: "failure", message: "configured fallback failed" };
 		}
 		return mode === "recover"
 			? {
@@ -448,7 +502,7 @@ test("wires primary failure through fallback and keeps fallback diagnostics UI-o
 						rationale: "Safe test action.",
 					},
 				}
-			: { kind: "failure", message: "secondary channel failed" };
+			: { kind: "failure", message: "current model failed" };
 	} as typeof originalReview;
 
 	const notices: string[] = [];
@@ -458,16 +512,20 @@ test("wires primary failure through fallback and keeps fallback diagnostics UI-o
 		provider: "openai-codex",
 		id: "codex-auto-review",
 	};
+	const current = { provider: "anthropic", id: "current-model" };
 	const ctx = {
 		cwd: join(root, "project"),
 		isProjectTrusted: () => false,
+		model: current,
 		modelRegistry: {
 			find: (provider: string, model: string) =>
 				provider === primary.provider && model === primary.id
 					? primary
 					: provider === fallback.provider && model === fallback.id
 						? fallback
-						: undefined,
+						: provider === current.provider && model === current.id
+							? current
+							: undefined,
 			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }),
 		},
 		sessionManager: { getBranch: () => branch },
@@ -497,9 +555,12 @@ test("wires primary failure through fallback and keeps fallback diagnostics UI-o
 		assert.deepEqual(reviewCalls, [
 			"custom/reviewer",
 			"openai-codex/codex-auto-review",
+			"anthropic/current-model",
 		]);
 		assert.equal(Object.isFrozen(recovered.input), true);
-		assert.match(notices.join("\n"), /using fallback/);
+		assert.match(notices.join("\n"), /using configured fallback/);
+		assert.match(notices.join("\n"), /using current session model/);
+		assert.match(notices.join("\n"), /Guardian · allowed/);
 
 		mode = "fail";
 		branch = [
@@ -521,11 +582,52 @@ test("wires primary failure through fallback and keeps fallback diagnostics UI-o
 		assert.equal(blocked?.block, true);
 		assert.doesNotMatch(
 			blocked?.reason ?? "",
-			/fallback|openai-codex|custom\/reviewer|secondary channel/i,
+			/fallback|openai-codex|custom\/reviewer|anthropic\/current-model|channel failed|current model failed/i,
 		);
-		assert.match(notices.join("\n"), /primary and fallback reviewers both failed/);
+		assert.match(notices.join("\n"), /all attempted reviewer channels failed/);
 		assert.match(notices.join("\n"), /primary channel failed/);
-		assert.match(notices.join("\n"), /secondary channel failed/);
+		assert.match(notices.join("\n"), /configured fallback failed/);
+		assert.match(notices.join("\n"), /current model failed/);
+		assert.deepEqual(
+			[...controllerInstances].map(([model, instances]) => [
+				model,
+				instances.size,
+			]),
+			[
+				["custom/reviewer", 1],
+				["openai-codex/codex-auto-review", 1],
+				["anthropic/current-model", 1],
+			],
+		);
+
+		mode = "timeout";
+		branch = [
+			{
+				type: "message",
+				id: "timeout-user",
+				message: { role: "user", content: "Run another safe command" },
+			},
+			{
+				type: "message",
+				id: "batch-3",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call-3" }],
+				},
+			},
+		];
+		const callCountBeforeTimeout = reviewCalls.length;
+		const timedOut = event("bash", { command: "printf timeout" });
+		(timedOut as { toolCallId: string }).toolCallId = "call-3";
+		const timeoutBlocked = (await handlers.get("tool_call")?.(
+			timedOut,
+			ctx,
+		)) as { block: boolean; reason: string } | undefined;
+		assert.equal(timeoutBlocked?.block, true);
+		assert.match(timeoutBlocked?.reason ?? "", /deadline/i);
+		assert.deepEqual(reviewCalls.slice(callCountBeforeTimeout), [
+			"custom/reviewer",
+		]);
 	} finally {
 		ReviewerSessionController.prototype.review = originalReview;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -613,7 +715,7 @@ test("reports unavailable configured auth in health status", () => {
 	assert.deepEqual(guardianHealth(config, registry as never), {
 		ready: false,
 		reason:
-			"Reviewer authentication is unavailable for custom. Fallback unavailable: Reviewer model not found: openai-codex/codex-auto-review.",
+			"Primary unavailable: Reviewer authentication is unavailable for custom. Configured fallback unavailable: Reviewer model not found: openai-codex/codex-auto-review.",
 	});
 });
 
@@ -637,8 +739,8 @@ test("uses the default Codex fallback when a custom primary is unavailable", () 
 	};
 	assert.deepEqual(guardianHealth(config, registry as never), {
 		ready: true,
-		reason: "Reviewer model not found: custom/reviewer.",
-		usingFallback: true,
+		reason: "Primary unavailable: Reviewer model not found: custom/reviewer.",
+		selectedFallback: "configured-fallback",
 	});
 });
 
@@ -660,8 +762,32 @@ test("reports a degraded fallback while the primary remains ready", () => {
 	};
 	assert.deepEqual(guardianHealth(config, registry as never), {
 		ready: true,
-		reason: "Fallback unavailable: Reviewer model not found: missing/fallback.",
+		reason:
+			"Configured fallback unavailable: Reviewer model not found: missing/fallback.",
 		fallbackUnavailable: true,
+	});
+});
+
+test("uses the current session model as the final healthy fallback", () => {
+	const config = loadGuardianConfig({
+		cwd: "/repo/project",
+		projectTrusted: false,
+		agentDir: "/missing-agent-dir",
+		env: {
+			PI_APPROVAL_GUARDIAN_MODEL: "missing/primary",
+			PI_APPROVAL_GUARDIAN_FALLBACK_MODEL: "missing/fallback",
+		},
+	});
+	const current = { provider: "anthropic", id: "current-model" } as never;
+	const registry = {
+		find: () => undefined,
+		hasConfiguredAuth: (model: unknown) => model === current,
+	};
+	assert.deepEqual(guardianHealth(config, registry as never, current), {
+		ready: true,
+		reason:
+			"Primary unavailable: Reviewer model not found: missing/primary. Configured fallback unavailable: Reviewer model not found: missing/fallback.",
+		selectedFallback: "current-model",
 	});
 });
 
@@ -717,7 +843,8 @@ test("registers lifecycle health and verifies command authentication", async () 
 	} as never);
 	assert.deepEqual(calls, [["approval-guardian", "Guardian · needs attention"]]);
 	assert.match(notices.join("\n"), /authentication is unavailable/);
-	assert.match(notices.join("\n"), /same as primary \(no separate fallback\)/);
+	assert.match(notices.join("\n"), /same as primary \(no separate channel\)/);
+	assert.match(notices.join("\n"), /Current-model fallback: unavailable/);
 	assert.doesNotMatch(notices.join("\n"), /Fallback unavailable:/);
 });
 

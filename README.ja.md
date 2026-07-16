@@ -35,13 +35,13 @@ Default setup では設定ファイルは不要です。
 | Tool/action | Default scope |
 | --- | --- |
 | `bash.command` | 常に審査 |
-| `grep.path` | broad/pathless search を含め常に審査 |
+| `grep.path` | プロジェクト外、または path/pattern/glob/effective scope が private data を含み得る場合に審査 |
 | `read.path` | 既知の private data |
 | `find.path` / `ls.path` | 既知の private path |
 | `write.path` / `edit.path` | プロジェクト外または private/sensitive path |
 | String `path` を持つ他の tool | Default `private-only` |
 
-通常のプロジェクト内 source edit は reviewer latency なしで実行します。ユーザーが直接入力する `!` / `!!`、別 terminal、別 process は対象外です。
+通常の clean なプロジェクト内 source edit と search は reviewer latency なしで実行します。ユーザーが直接入力する `!` / `!!`、別 terminal、別 process は対象外です。
 
 ## 動作
 
@@ -85,7 +85,7 @@ Canonical path と symlink target を確認します。
 
 ## Reviewer behavior
 
-- Main conversation とは別の model/in-memory session。
+- Reviewer state は独立した in-memory session を使用します。最後の fallback は main session の model identity を使う場合がありますが、conversation state は再利用しません。
 - Normal review は `read`、`grep`、`find`、`ls` のみ。
 - Private-data authorization review は tools なし。
 - Reviewer に `bash`、`write`、`edit` を渡しません。
@@ -109,7 +109,7 @@ Trusted project：`<project>/.pi/approval-guardian.json`
 }
 ```
 
-Pi model registry に登録・認証済みの custom reviewer channel も使用できます。`fallbackModel` の default は公式 `openai-codex/codex-auto-review` です。別の primary が見つからない、利用可能な auth がない、failure、timeout の場合は fallback を試し、UI のみに短い通知を表示します。明示的 deny と cancel では fallback しません。
+Pi model registry に登録・認証済みの custom reviewer channel も使用できます。重複 model を除外した後、Guardian は primary、設定済み `fallbackModel`、最後に現在の Pi session model の順で試します。model/auth unavailable または明確な failure の場合だけ次へ進みます。Timeout はその action の terminal fail-closed result となり、別 channel は試しません。Allow、明示的 deny、cancel でも直ちに停止します。各 channel は独立して incremental reuse される reviewer session を使い、切り替え通知は UI のみに表示します。
 
 Default review matrix：
 
@@ -117,7 +117,7 @@ Default review matrix：
 {
   "review": {
     "bash.command": "always",
-    "grep.path": "always",
+    "grep.path": "outside-or-private",
     "read.path": "private-only",
     "find.path": "private-only",
     "ls.path": "private-only",
@@ -135,11 +135,13 @@ Trusted project は global protection を強化のみ可能です：
 off < private-only < outside-or-private < always
 ```
 
+Default では agent の `bash` を毎回 review します。一方、通常の project 内 `grep` は path、selector、effective scope が private data を含まない場合、reviewer latency を追加しません。より厳格な profile では `grep.path` を `always` にできます。同等の shell gate または sandbox がない限り、`bash.command` の無効化は推奨しません。
+
 Environment variables：`PI_APPROVAL_GUARDIAN_MODEL`、`PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`、`PI_APPROVAL_GUARDIAN_TIMEOUT_MS`、`PI_APPROVAL_GUARDIAN_POLICY`。
 
 Primary model/fallback model/timeout precedence：`environment > trusted project > global > built-in default`。Policy は global、trusted project、environment の設定を加算します。
 
-`/approval-guardian` で primary/fallback readiness と config source、`/approval-guardian rules` で effective rules を確認できます。
+`/approval-guardian` で primary、configured fallback、current-model fallback の readiness と config source、`/approval-guardian rules` で effective rules を確認できます。
 
 ## Update / remove
 
@@ -175,7 +177,7 @@ Versioned npm spec は pin されます。Pin を進めるには新しい explic
 - allow 後、Guardian は JSON-like tool input を検証して lock し、後続 `tool_call` handler の変更を防ぎます。Exotic runtime value は fail closed になります。commandPrefix、spawnHook、custom tool internal behavior、dispatch 後の filesystem は観測できません。
 - Pathless または nested-path custom tools、MCP、network、browser、email、deployment、subagent action は自動的にすべて保護されず、dedicated enforcement が必要です。
 - Filesystem state は review と execution の間に変化する可能性があります。
-- Primary と fallback の reviewer channel が両方 unavailable の場合、protected action は fail closed で block されます。
+- Primary、configured fallback、distinct current-model fallback がすべて unavailable の場合、protected action は fail closed で block されます。
 
 詳細は [docs/REFERENCE.md](docs/REFERENCE.md) を参照してください。
 

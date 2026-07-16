@@ -7,7 +7,7 @@ This document defines the runtime behavior and configuration contract for `pi-ap
 | Rule | Default | Behavior |
 | --- | --- | --- |
 | `bash.command` | `always` | Reviews every Pi agent-issued shell command. |
-| `grep.path` | `always` | Reviews path, pattern, glob, and effective search scope. Empty paths fall back to the current working directory. |
+| `grep.path` | `outside-or-private` | Reviews outside-project searches plus selectors/scopes that may expose private data. Ordinary clean in-project source searches bypass reviewer latency. Empty paths fall back to the current working directory. |
 | `read.path` | `private-only` | Reviews canonical targets classified as private. |
 | `find.path` | `private-only` | Reviews known private targets. |
 | `ls.path` | `private-only` | Reviews known private targets. |
@@ -78,11 +78,11 @@ Policy composition:
 default policy + global policy + trusted-project policy + environment policy
 ```
 
-Malformed primary/fallback model, timeout, policy, review container, review level, unknown top-level key, or unsupported review-rule key produces a fatal diagnostic and blocks covered tool execution fail-closed. The schema is intentionally strict so a misspelled policy or rule cannot be silently ignored; remove obsolete metadata keys when upgrading. Review rules allow the documented built-in keys and arbitrary custom `<tool>.path` keys; other parameter names cannot be consumed at runtime. Model IDs may contain additional slashes after the provider separator.
+Malformed primary/fallback model, timeout, policy, review container, review level, unknown top-level key, or unsupported review-rule key produces a fatal diagnostic. Because validation runs before action-scope classification, an invalid configuration blocks every agent `tool_call` intercepted by the extension, including calls that would otherwise be outside the review matrix. The schema is intentionally strict so a misspelled policy or rule cannot be silently ignored; remove obsolete metadata keys when upgrading. Review rules allow the documented built-in keys and arbitrary custom `<tool>.path` keys; other parameter names cannot be consumed at runtime. Model IDs may contain additional slashes after the provider separator.
 
-`fallbackModel` defaults to `openai-codex/codex-auto-review`. It is attempted only when it differs from the primary and that primary is missing, lacks usable authentication, returns a terminal failure, or times out. When both settings resolve to the same spec—the default—there is no separate fallback attempt. An explicit deny or cancellation never triggers fallback. Each reviewer channel receives the configured deadline and its own retry budget. When fallback activates, Guardian emits a UI-only warning and does not inject a fallback message into agent context.
+Reviewer channels are tried in this order after deduplicating equivalent model identities: configured primary, configured `fallbackModel`, then the current Pi session model as the final fallback. `fallbackModel` defaults to `openai-codex/codex-auto-review`. Guardian advances only when the prior channel is missing, lacks usable authentication, or returns an explicit failure. A timeout is terminal for the action and blocks fail-closed without trying another channel. An explicit allow, deny, or cancellation also stops the chain immediately. Each distinct reviewer channel that is reached receives the configured deadline and its own retry budget. The current model is used only as the model identity for a new isolated reviewer session; Guardian never reuses the main conversation session as reviewer state. Channel switches emit UI-only warnings and are not injected into agent context.
 
-`/approval-guardian` reports primary/fallback model, timeout, policy sources, and config-file state. It resolves usable request authentication but does not send a reviewer inference. Startup health performs only the faster configured-auth check, including a degraded warning when a distinct fallback is unavailable.
+`/approval-guardian` reports the primary, configured fallback, current-model fallback, timeout, policy sources, and config-file state. It resolves usable request authentication but does not send a reviewer inference. Startup health performs only the faster configured-auth check, including degraded and active-fallback status.
 
 ## Private-read classification
 
@@ -205,11 +205,13 @@ Selection prioritizes the first and latest user intent, other user messages that
 
 ## Session reuse
 
-- The first review sends a bounded full transcript.
-- Successful assessments advance the reviewer transcript cursor.
-- Later reviews send only new transcript entries and the new planned action.
-- Reviewer calls are serialized.
-- Branch divergence, cwd/model/fallback-model/timeout/policy changes, channel switches, reload, or shutdown dispose the old reviewer session.
+- Each distinct reviewer channel and review mode (normal versus private-data authorization) keeps its own isolated controller/session.
+- The first review on that channel sends a bounded full transcript.
+- Successful assessments advance that channel's reviewer transcript cursor.
+- Later reviews on the same channel send only new transcript entries and the new planned action.
+- Reviewer calls are serialized within each controller; Pi's current `tool_call` preflight contract also invokes sibling handlers sequentially.
+- Switching channels preserves the other channels' incremental reviewer state.
+- Branch divergence resets the affected reviewer session. Cwd/current-model/primary/fallback/timeout/policy changes, reload, or shutdown dispose all cached reviewer sessions.
 - Retry attempts use a fresh reviewer session and full bounded transcript.
 
 ## Retry and deadline
@@ -220,12 +222,18 @@ Selection prioritizes the first and latest user intent, other user messages that
 | Initial backoff | 200 ms |
 | Backoff factor | 2× |
 | Jitter | 0.9–1.1× |
-| Default shared deadline per reviewer channel | 90 seconds |
-| Allowed timeout range per reviewer channel | 1–300 seconds |
+| Default shared deadline per distinct reviewer channel | 90 seconds |
+| Allowed timeout range per distinct reviewer channel | 1–300 seconds |
 
 Retries apply to malformed assessment output and selected transient provider failures such as overload, rate limiting, HTTP 5xx, and transport/stream errors. Quota and billing exhaustion are terminal.
 
-Within one reviewer channel, session startup, attempts, prompts, backoff, and cleanup share one deadline. A distinct fallback channel receives a fresh configured deadline. Explicit allow/deny and cancellation are not retried through fallback; primary failure and timeout may activate it.
+Within one reviewer channel, session startup, attempts, prompts, backoff, and cleanup share one deadline. Authentication resolution and time spent waiting behind an earlier serialized review currently occur before that controller deadline, so wall-clock latency can exceed the displayed value. A reached fallback channel receives a fresh configured deadline only when the preceding channel returned an explicit failure. Allow, deny, cancellation, and timeout are terminal and never activate another channel. Consequently, a reviewer that consumes the full 90-second default without producing a valid assessment blocks the action immediately instead of starting another 90-second fallback review. Missing-model and authentication failures normally switch quickly; other explicit failures may occur after provider/session work but before the deadline.
+
+## Usability and review frequency
+
+The default profile reviews every agent-issued `bash` command because arbitrary shell syntax cannot be safely reduced to a broad deterministic allowlist. `grep.path` defaults to `outside-or-private`, so an ordinary clean in-project source search bypasses reviewer inference; private selectors, private effective scopes, and outside-project searches still trigger review. Set `grep.path` to `always` for a stricter profile. Disabling `bash.command` removes a major security boundary and is recommended only when another trusted shell-approval or sandbox layer provides equivalent enforcement.
+
+Every allow or block result remains visible through a per-action UI notification so users can tell which calls were actually reviewed. Timeouts, channel switches, and health problems are also reported. Private-data reads intentionally require a new explicit user message identifying the exact path or clearly named private source and purpose. This extra turn is considered acceptable friction because it prevents broad project requests from silently authorizing credential access. Invalid configuration remains globally fail-closed as described above, so `/approval-guardian` should be checked immediately after editing configuration.
 
 ## Adverse-outcome circuit breaker
 
@@ -260,4 +268,4 @@ When the circuit opens, the current run is aborted and later covered actions are
 - Guardian locks approved `event.input` against later `tool_call` handlers, but cannot observe command prefixes, spawn hooks, or a custom tool's internal behavior after dispatch.
 - Filesystem state may change between classification and execution.
 - Reviewer decisions are probabilistic.
-- At least one configured reviewer channel must be available because failure of both primary and fallback blocks covered actions.
+- At least one distinct reviewer channel must be available; failure of the configured primary, configured fallback, and current-model fallback blocks covered actions.

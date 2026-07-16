@@ -35,13 +35,13 @@ No configuration file is required for the default setup.
 | Tool/action | Default review scope |
 | --- | --- |
 | `bash.command` | Always reviewed |
-| `grep.path` | Always reviewed, including broad/pathless searches |
+| `grep.path` | Reviewed outside the project or when path/pattern/glob/effective scope may expose private data |
 | `read.path` | Reviewed for known private data |
 | `find.path` / `ls.path` | Reviewed for known private paths |
 | `write.path` / `edit.path` | Reviewed outside the project or on private/sensitive paths |
 | Other tools with a string `path` | Default to `private-only` |
 
-Ordinary in-project source edits run without reviewer latency. Commands entered directly through Pi `!`/`!!`, another terminal, or another process are not intercepted.
+Ordinary clean in-project source edits and searches run without reviewer latency. Commands entered directly through Pi `!`/`!!`, another terminal, or another process are not intercepted.
 
 ## How it works
 
@@ -87,13 +87,12 @@ Canonical paths and symlink targets are checked before project-boundary decision
 
 ## Reviewer behavior
 
-- Uses a model separate from the main Pi conversation.
-- Keeps reviewer state in an isolated in-memory session.
+- Keeps reviewer state in an isolated in-memory session; the final fallback may use the main session's model identity but never its conversation state.
 - Provides only read-only investigation tools for normal reviews.
 - Provides no tools for private-data authorization reviews.
 - Never provides `bash`, `write`, or `edit` to the reviewer.
 - Treats transcript, files, tool output, and planned actions as untrusted evidence.
-- Reuses the reviewer session with bounded transcript deltas.
+- Reuses each distinct channel's reviewer session with bounded full-to-delta transcript updates.
 - Retries malformed output and selected transient provider failures up to three attempts within one shared deadline per reviewer channel.
 
 Three consecutive adverse batches, or ten adverse batches among the latest fifty reviews, open the per-run circuit. Denials, timeouts, and failures are adverse; allows and cancellations are not. Sibling tool calls emitted by one assistant message form one batch.
@@ -123,7 +122,7 @@ Minimal example:
 }
 ```
 
-Custom reviewer channels are supported when the provider/model is already registered and authenticated in Pi. `fallbackModel` defaults to the official `openai-codex/codex-auto-review`; when a distinct primary is missing, unauthenticated, fails, or times out, Guardian tries the fallback and shows a UI-only warning. Explicit deny and cancellation do not trigger fallback.
+Custom reviewer channels are supported when the provider/model is already registered and authenticated in Pi. After deduplication, Guardian tries the configured primary, configured `fallbackModel`, and finally the current Pi session model. It advances only after a missing model, unusable authentication, or explicit failure. A timeout is terminal for that action and fails closed without trying another channel; allow, explicit deny, and cancellation also stop the chain. Each channel uses its own isolated, incrementally reused reviewer session, and switch notices are UI-only.
 
 ### Review scopes
 
@@ -131,7 +130,7 @@ Custom reviewer channels are supported when the provider/model is already regist
 {
   "review": {
     "bash.command": "always",
-    "grep.path": "always",
+    "grep.path": "outside-or-private",
     "read.path": "private-only",
     "find.path": "private-only",
     "ls.path": "private-only",
@@ -154,6 +153,8 @@ Trusted project rules may strengthen, but cannot weaken, the effective global fl
 off < private-only < outside-or-private < always
 ```
 
+The defaults review every agent-issued `bash` command, while ordinary in-project `grep` searches bypass reviewer latency unless their path, selector, or effective scope may expose private data. Set `grep.path` to `always` for a stricter profile. Disabling `bash.command` removes a major security boundary and is appropriate only when another trusted shell gate or sandbox provides equivalent enforcement.
+
 ### Environment variables
 
 ```bash
@@ -171,7 +172,7 @@ environment > trusted project > global > built-in default
 
 Policy is additive across global, trusted-project, and environment configuration.
 
-Run `/approval-guardian` to inspect primary/fallback readiness and effective config sources, or `/approval-guardian rules` for the rule matrix.
+Run `/approval-guardian` to inspect primary, configured-fallback, and current-model readiness plus effective config sources, or `/approval-guardian rules` for the rule matrix.
 
 ## Update and remove
 
@@ -215,7 +216,7 @@ A versioned install such as `npm:pi-approval-guardian@<version>` is pinned. Inst
 - After an allow, Guardian validates and locks JSON-like tool input against later `tool_call` handler mutation; exotic runtime values fail closed. It does not observe commandPrefix, spawnHook, custom-tool internals, or filesystem changes after dispatch.
 - Arbitrary pathless or nested-path custom tools, MCP, network, browser, email, deployment, and subagent actions are not automatically gated; they need dedicated enforcement.
 - Filesystem state can change between review and execution.
-- If both the primary and fallback reviewer channels are unavailable, protected actions fail closed.
+- If the configured primary, configured fallback, and distinct current-model fallback are all unavailable, protected actions fail closed.
 - Use Pi project trust and OS/container sandboxing separately; they solve different security layers.
 
 For the full behavior and configuration contract, see [docs/REFERENCE.md](docs/REFERENCE.md).

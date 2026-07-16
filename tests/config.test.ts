@@ -187,7 +187,7 @@ test("does not load project config for an untrusted project", () => {
 	assert.equal(config.fallbackModelSource, "default");
 	assert.equal(config.policy, undefined);
 	assert.equal(config.review["read.path"], "private-only");
-	assert.equal(config.review["grep.path"], "always");
+	assert.equal(config.review["grep.path"], "outside-or-private");
 	assert.equal(config.review["find.path"], "private-only");
 	assert.equal(config.review["ls.path"], "private-only");
 	assert.equal(config.review["hypa_read.path"], undefined);
