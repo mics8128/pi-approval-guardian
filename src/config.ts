@@ -17,8 +17,9 @@ export type ReviewLevel =
 export const DEFAULT_REVIEW_RULES: Readonly<Record<string, ReviewLevel>> = {
 	"bash.command": "always",
 	"read.path": "private-only",
-	"hypa_read.path": "private-only",
 	"grep.path": "always",
+	"find.path": "private-only",
+	"ls.path": "private-only",
 	"write.path": "outside-or-private",
 	"edit.path": "outside-or-private",
 };

@@ -1,4 +1,5 @@
 // pi-lens-ignore: find-import-file-without-extension
+import { homedir } from "node:os";
 import {
 	isToolCallEventType,
 	type ExtensionAPI,
@@ -11,6 +12,7 @@ import {
 } from "../src/config.ts";
 import {
 	DenialCircuitBreaker,
+	ReviewBatchTracker,
 	classifyMutationPath,
 	classifyReadPath,
 	directoryMayContainPrivatePath,
@@ -36,12 +38,19 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	let controller: ReviewerSessionController | undefined;
 	let controllerKey: string | undefined;
 	const circuitBreaker = new DenialCircuitBreaker();
+	const reviewBatches = new ReviewBatchTracker();
 
 	const resetRuntime = () => {
 		controller?.dispose();
 		controller = undefined;
 		controllerKey = undefined;
 		circuitBreaker.reset();
+		reviewBatches.reset();
+	};
+
+	const finishReviewBatch = (batchId: string, ctx: ExtensionContext) => {
+		const denied = reviewBatches.finish(batchId);
+		if (denied !== undefined && circuitBreaker.record(denied)) ctx.abort();
 	};
 
 	pi.on("session_start", () => resetRuntime());
@@ -52,6 +61,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	});
 	pi.on("before_agent_start", () => {
 		circuitBreaker.reset();
+		reviewBatches.reset();
 	});
 
 	const showConfiguration = (
@@ -109,51 +119,64 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		const config = loadGuardianConfig({
-			cwd: ctx.cwd,
-			projectTrusted: ctx.isProjectTrusted(),
-		});
-		if (config.warnings.length > 0) {
-			return {
-				block: true,
-				reason: [
-					"Approval Guardian configuration is invalid, so tool execution failed closed.",
-					...config.warnings,
-				].join("\n"),
-			};
-		}
-		const action = actionFromToolCall(event, ctx.cwd, config.review);
-		if (!action) return;
+		const batch = toolCallBatchInfo(
+			event.toolCallId,
+			ctx.sessionManager.getBranch(),
+		);
+		try {
+			const config = loadGuardianConfig({
+				cwd: ctx.cwd,
+				projectTrusted: ctx.isProjectTrusted(),
+			});
+			if (config.warnings.length > 0) {
+				return {
+					block: true,
+					reason: [
+						"Approval Guardian configuration is invalid, so tool execution failed closed.",
+						...config.warnings,
+					].join("\n"),
+				};
+			}
+			const action = actionFromToolCall(event, ctx.cwd, config.review);
+			if (!action) return;
 
-		if (circuitBreaker.isOpen()) {
-			const result: GuardianReviewResult = {
-				kind: "circuit-open",
-				message: "Repeated Guardian denials reached the per-turn limit.",
-			};
-			ctx.ui.notify(formatReviewResult(result, action), "error");
+			if (circuitBreaker.isOpen()) {
+				const result: GuardianReviewResult = {
+					kind: "circuit-open",
+					message: "Repeated Guardian denials reached the per-turn limit.",
+				};
+				ctx.ui.notify(formatReviewResult(result, action), "error");
+				return { block: true, reason: rejectionReason(result) };
+			}
+
+			const reviewed = await reviewAction(action, ctx);
+			const result = enforceActionRequirements(action, reviewed);
+			reviewBatches.record(batch.id, result.kind === "denied");
+			if (result.kind === "allowed") {
+				ctx.ui.notify(formatReviewResult(result, action), "info");
+				return;
+			}
+
+			if (result.kind === "denied") {
+				ctx.ui.notify(formatReviewResult(result, action), "error");
+			} else {
+				ctx.ui.notify(
+					formatReviewResult(result, action),
+					result.kind === "cancelled" ? "warning" : "error",
+				);
+			}
 			return { block: true, reason: rejectionReason(result) };
+		} finally {
+			if (batch.isLast) finishReviewBatch(batch.id, ctx);
 		}
+	});
 
-		const reviewed = await reviewAction(action, ctx);
-		const result = enforceActionRequirements(action, reviewed);
-		if (result.kind === "allowed") {
-			circuitBreaker.record(false);
-			ctx.ui.notify(formatReviewResult(result, action), "info");
-			return;
-		}
-
-		if (result.kind === "denied") {
-			const opened = circuitBreaker.record(true);
-			ctx.ui.notify(formatReviewResult(result, action), "error");
-			if (opened) ctx.abort();
-		} else {
-			circuitBreaker.record(false);
-			ctx.ui.notify(
-				formatReviewResult(result, action),
-				result.kind === "cancelled" ? "warning" : "error",
-			);
-		}
-		return { block: true, reason: rejectionReason(result) };
+	pi.on("tool_execution_end", (event, ctx) => {
+		const batch = toolCallBatchInfo(
+			event.toolCallId,
+			ctx.sessionManager.getBranch(),
+		);
+		if (batch.isLast) finishReviewBatch(batch.id, ctx);
 	});
 
 	async function reviewAction(
@@ -234,6 +257,47 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	}
 }
 
+interface ToolCallBatchBranchEntry {
+	type: string;
+	id?: string;
+	message?: { role?: string; content?: unknown };
+}
+
+export function toolCallBatchInfo(
+	toolCallId: string,
+	branch: ReadonlyArray<ToolCallBatchBranchEntry>,
+): { id: string; isLast: boolean } {
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (
+			entry?.type !== "message" ||
+			entry.message?.role !== "assistant" ||
+			!Array.isArray(entry.message.content)
+		) {
+			continue;
+		}
+		const toolCallIds = entry.message.content.flatMap((block) => {
+			if (
+				typeof block !== "object" ||
+				block === null ||
+				!("type" in block) ||
+				block.type !== "toolCall" ||
+				!("id" in block) ||
+				typeof block.id !== "string"
+			) {
+				return [];
+			}
+			return [block.id];
+		});
+		if (!toolCallIds.includes(toolCallId)) continue;
+		return {
+			id: entry.id ?? `tool-message:${toolCallIds[0] ?? toolCallId}`,
+			isLast: toolCallIds.at(-1) === toolCallId,
+		};
+	}
+	return { id: `tool-call:${toolCallId}`, isLast: true };
+}
+
 export function reviewerToolsForAction(
 	action: GuardianAction,
 ): Array<"read" | "grep" | "find" | "ls"> | undefined {
@@ -251,7 +315,7 @@ export function actionFromToolCall(
 			tool: "bash",
 			payload: {
 				command: event.input.command,
-				private_data_read: commandReferencesPrivateData(event.input.command),
+				private_data_read: commandReferencesPrivateData(event.input.command, cwd),
 			},
 			cwd,
 		};
@@ -265,14 +329,6 @@ export function actionFromToolCall(
 			{ ...event.input, path: event.input.path || "." },
 			cwd,
 			rules["grep.path"],
-		);
-	}
-	if (event.toolName === "hypa_read") {
-		return pathReadAction(
-			"hypa_read",
-			event.input as Record<string, unknown>,
-			cwd,
-			rules["hypa_read.path"],
 		);
 	}
 	if (isToolCallEventType("write", event)) {
@@ -321,19 +377,27 @@ function pathReadAction(
 		typeof input.path === "string" && input.path.trim()
 			? input.path
 			: undefined;
-	const path = configuredPath ?? (level === "always" ? "." : undefined);
+	const directorySearchTool =
+		tool === "grep" || tool === "find" || tool === "ls";
+	const path =
+		configuredPath ??
+		(level === "always" || directorySearchTool ? "." : undefined);
 	if (!path) return;
 	const target = classifyReadPath(path, cwd);
+	const selector =
+		tool === "grep"
+			? input.glob
+			: tool === "find"
+				? input.pattern
+				: undefined;
 	const privateSelector =
-		tool === "grep" &&
-		typeof input.glob === "string" &&
-		looksLikePrivateGlob(input.glob);
+		typeof selector === "string" && looksLikePrivateGlob(selector);
 	const privateScope =
-		tool === "grep" &&
+		directorySearchTool &&
 		directoryMayContainPrivatePath(
 			path,
 			cwd,
-			typeof input.glob === "string" ? input.glob : undefined,
+			typeof selector === "string" ? selector : undefined,
 		);
 	if (!shouldReviewPath(level, target) && !privateSelector && !privateScope)
 		return;
@@ -357,7 +421,6 @@ const PRIVATE_COMMAND_DIRECTORIES = [
 	".azure",
 	".kube",
 	".docker",
-	".pi",
 	".password-store",
 	"secrets",
 	"secret",
@@ -366,8 +429,12 @@ const PRIVATE_COMMAND_DIRECTORIES = [
 	"keyrings",
 ];
 
-function commandReferencesPrivateData(command: string): boolean {
-	const normalized = command.replace(/\\/g, "/").toLowerCase();
+function commandReferencesPrivateData(command: string, cwd: string): boolean {
+	const expanded = command
+		.replace(/\$\{HOME\}|\$HOME/gi, homedir())
+		.replace(/(^|[\s'"=])~(?=\/)/g, `$1${homedir()}`)
+		.replace(/\\/g, "/");
+	const normalized = expanded.toLowerCase();
 	if (
 		PRIVATE_COMMAND_DIRECTORIES.some((directory) =>
 			new RegExp(
@@ -377,9 +444,52 @@ function commandReferencesPrivateData(command: string): boolean {
 	) {
 		return true;
 	}
+	if (referencesDynamicPiPath(expanded)) return true;
+	if (commandPiPaths(expanded).some((path) => classifyReadPath(path, cwd).private)) {
+		return true;
+	}
 	return /(?:^|[\s'"=\/])(?:\.env(?:\.[^\s'";|&\/]*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|auth\.json|tokens?\.json|credentials(?:\.json)?|secrets?\.json|id_(?:rsa|ed25519|ecdsa|dsa)|[^\s'";|&\/]+\.(?:pem|key|p12|pfx|jks|keystore|kdbx|tfvars))(?=$|[\s'";|&\/])/i.test(
 		normalized,
 	);
+}
+
+function referencesDynamicPiPath(command: string): boolean {
+	const piTokens = command
+		.split(/[\s'"`;|&<>()]+/)
+		.filter((token) => token.toLowerCase().includes(".pi"));
+	if (piTokens.some((token) => /[*?\[\]{}$]/.test(token))) return true;
+
+	const assignments = command.matchAll(
+		/(?:^|[;\s])([a-z_][a-z0-9_]*)\s*=\s*["']?([^;\s"']*\.pi[^;\s"']*)/gi,
+	);
+	for (const assignment of assignments) {
+		const variable = assignment[1];
+		if (!variable) continue;
+		const remaining = command.slice(
+			(assignment.index ?? 0) + assignment[0].length,
+		);
+		const variableReference = new RegExp(
+			`\\$(?:${escapeRegExp(variable)}\\b|\\{${escapeRegExp(variable)}\\})`,
+		);
+		if (variableReference.test(remaining)) return true;
+	}
+	return false;
+}
+
+function commandPiPaths(command: string): string[] {
+	return command
+		.split(/[\s'"`;|&<>()]+/)
+		.map((token) => token.slice(token.lastIndexOf("=") + 1))
+		.map((token) => token.replace(/^[\[{]+|[\]},]+$/g, ""))
+		.filter((token) => {
+			const normalized = token.toLowerCase();
+			return (
+				normalized === ".pi" ||
+				normalized.startsWith(".pi/") ||
+				normalized.includes("/.pi/") ||
+				normalized.endsWith("/.pi")
+			);
+		});
 }
 
 function escapeRegExp(value: string): string {

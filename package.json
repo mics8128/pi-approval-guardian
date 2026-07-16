@@ -1,6 +1,6 @@
 {
   "name": "pi-approval-guardian",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "A fail-closed Pi approval gate that reviews shell actions, private data access, and sensitive file mutations with an isolated risk model.",
   "type": "module",
   "keywords": [
@@ -24,6 +24,7 @@
     "extensions",
     "src",
     "docs/PUBLISHING.md",
+    "docs/REFERENCE.md",
     "README*.md",
     "LICENSE",
     "LICENSES/Apache-2.0.txt",

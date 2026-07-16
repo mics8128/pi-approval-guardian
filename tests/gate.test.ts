@@ -1,13 +1,14 @@
 // pi-lens-ignore: find-import-file-without-extension
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
 	AUTO_REVIEW_DENIAL_WINDOW_SIZE,
 	DenialCircuitBreaker,
 	MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN,
+	ReviewBatchTracker,
 	MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN,
 	classifyMutationPath,
 	classifyReadPath,
@@ -38,6 +39,17 @@ test("allows reset consecutive denials but retains the recent window", () => {
 	}
 	assert.equal(breaker.record(true), true);
 	assert.equal(AUTO_REVIEW_DENIAL_WINDOW_SIZE, 50);
+});
+
+test("counts simultaneous reviewed tool calls as one denial batch", () => {
+	const breaker = new DenialCircuitBreaker();
+	const batches = new ReviewBatchTracker();
+	for (const denied of [true, true, true]) batches.record("assistant-1", denied);
+	assert.equal(breaker.record(batches.finish("assistant-1") ?? false), false);
+	batches.record("assistant-2", true);
+	assert.equal(breaker.record(batches.finish("assistant-2") ?? false), false);
+	batches.record("assistant-3", true);
+	assert.equal(breaker.record(batches.finish("assistant-3") ?? false), true);
 });
 
 test("reviews writes and edits outside the project", () => {
@@ -153,6 +165,77 @@ test("requires review for common Linux, macOS, and Windows private locations", (
 	);
 });
 
+test("narrows Pi private reads to known confidential data", () => {
+	for (const path of [
+		"/home/test/.pi/settings.json",
+		"/home/test/.pi/web-search.json",
+		"/home/test/.pi/agent/auth.json",
+		"/home/test/.pi/agent/settings.json",
+		"/home/test/.pi/agent/models.json",
+		"/home/test/.pi/agent/approval-guardian.json",
+		"/home/test/.pi/agent/llm-provider-api-key",
+		"/home/test/.pi/agent/sessions/project/session.jsonl",
+		"/home/test/.pi/agent/delegates/jobs/job.json",
+		"/home/test/.pi/context-mode/content",
+		"/home/test/.pi/context-mode/content/index.db",
+		"/home/test/.pi/context-mode/sessions/session.db",
+		"/home/test/.pi/memory",
+		"/home/test/.pi/memory/memory.db",
+		"/home/test/.pi/session-search/config.json",
+		"/home/test/.pi/session-search/index",
+		"/home/test/.pi/session-search/index/sessions-fts.db",
+		"/home/test/.pi/knowledge-search-/kb-fts.db",
+		"/home/test/.pi/pi-acp",
+		"/home/test/.pi/pi-acp/session-map.json",
+		join(
+			homedir(),
+			".pi/agent/npm/node_modules/example/private/credentials.json",
+		),
+		join(homedir(), ".pi/agent/npm/node_modules/example/.env"),
+		join(
+			homedir(),
+			".pi/agent/npm/node_modules/example/credentials/account.json",
+		),
+		join(
+			homedir(),
+			".pi/agent/npm/node_modules/example/.aws/config",
+		),
+	]) {
+		assert.equal(classifyReadPath(path, "/repo/project").private, true, path);
+	}
+
+	for (const path of [
+		"/home/test/.pi/exa-usage.json",
+		"/home/test/.pi/agent/npm/node_modules/@upstash/context7-pi/skills/context7-docs/SKILL.md",
+		join(
+			homedir(),
+			".pi/agent/npm/node_modules/example/private/README.md",
+		),
+		"/home/test/.pi/agent/skills/custom/SKILL.md",
+		"/home/test/.pi/agent/agents/reviewer.md",
+		"/home/test/.pi/agent/extensions/example/index.ts",
+		"/home/test/.pi/agent/npm/package.json",
+		"/home/test/.pi/agent/git/github.com/public/repo/README.md",
+		"/home/test/.pi/context-mode/insight-cache/src/main.ts",
+	]) {
+		assert.equal(classifyReadPath(path, "/repo/project").private, false, path);
+	}
+	assert.equal(
+		classifyReadPath(
+			"/repo/project/.pi/agent/npm/node_modules/pkg/.env",
+			"/repo/project",
+		).private,
+		true,
+	);
+	assert.equal(
+		classifyReadPath(
+			"/repo/project/.pi/agent/npm/node_modules/pkg/README.md",
+			"/repo/project",
+		).private,
+		false,
+	);
+});
+
 test("applies configured path review levels", () => {
 	const windowsInside = classifyReadPath(
 		"C:\\repo\\project\\README.md",
@@ -188,4 +271,13 @@ test("reviews sensitive paths inside the project", () => {
 	const target = classifyMutationPath(".ssh/config", "/repo/project");
 	assert.equal(target.sensitive, true);
 	assert.deepEqual(target.reasons, ["sensitive path"]);
+	assert.equal(
+		classifyMutationPath(".pi/skills/reviewer/SKILL.md", "/repo/project")
+			.sensitive,
+		true,
+	);
+	assert.equal(
+		classifyMutationPath(".pi/cache/index.json", "/repo/project").sensitive,
+		false,
+	);
 });
