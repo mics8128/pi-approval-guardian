@@ -13,6 +13,7 @@ import {
 	DenialCircuitBreaker,
 	classifyMutationPath,
 	classifyReadPath,
+	directoryMayContainPrivatePath,
 	shouldReviewPath,
 	type GuardianReviewResult,
 } from "../src/gate.ts";
@@ -112,6 +113,15 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			projectTrusted: ctx.isProjectTrusted(),
 		});
+		if (config.warnings.length > 0) {
+			return {
+				block: true,
+				reason: [
+					"Approval Guardian configuration is invalid, so tool execution failed closed.",
+					...config.warnings,
+				].join("\n"),
+			};
+		}
 		const action = actionFromToolCall(event, ctx.cwd, config.review);
 		if (!action) return;
 
@@ -183,12 +193,18 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				};
 			}
 
-			const systemPrompt = buildGuardianSystemPrompt(config.policy);
+			const privateDataReview = action.payload.private_data_read === true;
+			const baseSystemPrompt = buildGuardianSystemPrompt(config.policy);
+			const systemPrompt = privateDataReview
+				? `${baseSystemPrompt}\n\n# Private Data Review Restriction\nNo investigation tools are available for this review. Decide authorization only from the user transcript and planned-action metadata; deny if explicit authorization is not established.`
+				: baseSystemPrompt;
+			const reviewerTools = reviewerToolsForAction(action);
 			const key = JSON.stringify({
 				cwd: ctx.cwd,
 				model: `${model.provider}/${model.id}`,
 				timeoutMs: config.timeoutMs,
 				systemPrompt,
+				privateDataReview,
 			});
 			if (!controller || controllerKey !== key) {
 				controller?.dispose();
@@ -198,6 +214,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 					cwd: ctx.cwd,
 					systemPrompt,
 					timeoutMs: config.timeoutMs,
+					tools: reviewerTools,
 				});
 				controllerKey = key;
 			}
@@ -217,6 +234,12 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	}
 }
 
+export function reviewerToolsForAction(
+	action: GuardianAction,
+): Array<"read" | "grep" | "find" | "ls"> | undefined {
+	return action.payload.private_data_read === true ? [] : undefined;
+}
+
 export function actionFromToolCall(
 	event: ToolCallEvent,
 	cwd: string,
@@ -224,7 +247,14 @@ export function actionFromToolCall(
 ): GuardianAction | undefined {
 	if (isToolCallEventType("bash", event)) {
 		if ((rules["bash.command"] ?? "always") === "off") return;
-		return { tool: "bash", payload: { command: event.input.command }, cwd };
+		return {
+			tool: "bash",
+			payload: {
+				command: event.input.command,
+				private_data_read: commandReferencesPrivateData(event.input.command),
+			},
+			cwd,
+		};
 	}
 	if (isToolCallEventType("read", event)) {
 		return pathReadAction("read", event.input, cwd, rules["read.path"]);
@@ -287,14 +317,26 @@ function pathReadAction(
 	cwd: string,
 	level: ReviewLevel = "private-only",
 ): GuardianAction | undefined {
-	const path = input.path;
-	if (typeof path !== "string") return;
+	const configuredPath =
+		typeof input.path === "string" && input.path.trim()
+			? input.path
+			: undefined;
+	const path = configuredPath ?? (level === "always" ? "." : undefined);
+	if (!path) return;
 	const target = classifyReadPath(path, cwd);
 	const privateSelector =
 		tool === "grep" &&
 		typeof input.glob === "string" &&
 		looksLikePrivateGlob(input.glob);
-	if (!shouldReviewPath(level, target) && !privateSelector) return;
+	const privateScope =
+		tool === "grep" &&
+		directoryMayContainPrivatePath(
+			path,
+			cwd,
+			typeof input.glob === "string" ? input.glob : undefined,
+		);
+	if (!shouldReviewPath(level, target) && !privateSelector && !privateScope)
+		return;
 	return {
 		tool,
 		payload: {
@@ -302,10 +344,46 @@ function pathReadAction(
 			path: target.absolutePath,
 			review_reasons: target.reasons,
 			review_level: level,
-			private_data_read: target.private || privateSelector,
+			private_data_read: target.private || privateSelector || privateScope,
 		},
 		cwd,
 	};
+}
+
+const PRIVATE_COMMAND_DIRECTORIES = [
+	".ssh",
+	".gnupg",
+	".aws",
+	".azure",
+	".kube",
+	".docker",
+	".pi",
+	".password-store",
+	"secrets",
+	"secret",
+	"credentials",
+	"keychains",
+	"keyrings",
+];
+
+function commandReferencesPrivateData(command: string): boolean {
+	const normalized = command.replace(/\\/g, "/").toLowerCase();
+	if (
+		PRIVATE_COMMAND_DIRECTORIES.some((directory) =>
+			new RegExp(
+				`(?:^|[\\s'"=/])${escapeRegExp(directory)}(?=$|[\\s'";&|/])`,
+			).test(normalized),
+		)
+	) {
+		return true;
+	}
+	return /(?:^|[\s'"=\/])(?:\.env(?:\.[^\s'";|&\/]*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|auth\.json|tokens?\.json|credentials(?:\.json)?|secrets?\.json|id_(?:rsa|ed25519|ecdsa|dsa)|[^\s'";|&\/]+\.(?:pem|key|p12|pfx|jks|keystore|kdbx|tfvars))(?=$|[\s'";|&\/])/i.test(
+		normalized,
+	);
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function looksLikePrivateGlob(glob: string): boolean {
@@ -320,8 +398,8 @@ function shouldReviewMutationTarget(
 ): boolean {
 	if (level === "always") return true;
 	if (level === "outside-or-private")
-		return target.outsideProject || target.sensitive;
-	if (level === "private-only") return target.sensitive;
+		return target.outsideProject || target.sensitive || target.private;
+	if (level === "private-only") return target.private;
 	return false;
 }
 
@@ -329,20 +407,32 @@ export function enforceActionRequirements(
 	action: GuardianAction,
 	result: GuardianReviewResult,
 ): GuardianReviewResult {
-	if (
-		result.kind !== "allowed" ||
-		action.payload.private_data_read !== true ||
-		result.assessment.user_authorization === "high"
+	if (result.kind !== "allowed") return result;
+	const { risk_level: risk, user_authorization: authorization } =
+		result.assessment;
+	let rationale: string | undefined;
+	if (risk === "critical") {
+		rationale = "Critical-risk actions cannot be automatically approved.";
+	} else if (
+		risk === "high" &&
+		(authorization === "unknown" || authorization === "low")
 	) {
-		return result;
+		rationale =
+			"High-risk actions require at least medium user authorization.";
+	} else if (
+		action.payload.private_data_read === true &&
+		authorization !== "high"
+	) {
+		rationale =
+			"The private-data read lacks explicit high user authorization. Explain the exact source and purpose, then wait for the user to authorize it in conversation before retrying.";
 	}
+	if (!rationale) return result;
 	return {
 		kind: "denied",
 		assessment: {
 			...result.assessment,
 			outcome: "deny",
-			rationale:
-				"The private-data read lacks explicit high user authorization. Explain the exact source and purpose, then wait for the user to authorize it in conversation before retrying.",
+			rationale,
 		},
 	};
 }

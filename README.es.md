@@ -4,7 +4,7 @@
 
 **Una puerta de aprobación automática fail-closed, inspirada en Codex Guardian, para Pi.**
 
-Revisa todos los `bash` emitidos por el agente y las operaciones `write`/`edit` fuera del proyecto o sobre rutas sensibles antes de ejecutarlas.
+Revisa todo `bash` del agente, lecturas/búsquedas privadas y operaciones `write`/`edit` fuera del proyecto o sobre rutas privadas antes de ejecutarlas.
 
 [![npm version](https://img.shields.io/npm/v/pi-approval-guardian.svg)](https://www.npmjs.com/package/pi-approval-guardian)
 [![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions)
@@ -39,11 +39,11 @@ Reinicia Pi o ejecuta `/reload`, y comprueba el estado con `/approval-guardian`.
 
 ```text
 Pi agent tool call
-  ├─ edición normal dentro del proyecto ─────► ejecución normal
-  └─ bash / write sensible / edit sensible
+  ├─ edición o lectura normal ───────────────► ejecución normal
+  └─ bash / read o grep privado / mutación sensible
                   ▼
        reviewer Guardian aislado
-       solo read · grep · find · ls
+       normal: solo read · grep · find · ls; datos privados: sin tools
                   ▼
        solo un allow explícito se ejecuta
 ```
@@ -57,11 +57,14 @@ Solo un `{"outcome":"allow"}` válido permite la ejecución. Denegación, timeou
 | Función | Comportamiento |
 | --- | --- |
 | Todo `bash` del agente | Se revisa antes de ejecutarse. |
+| `read`/`hypa_read` privado | Solo se permite con autorización explícita high en la conversación. |
+| `grep` | Siempre se revisan path, glob y alcance de búsqueda. |
+| Tool path no configurada | Un parámetro `path` string usa `private-only` por defecto. |
 | `write` sensible | Se revisa si el destino canónico está fuera del proyecto o coincide con una regla sensible. |
 | `edit` sensible | Usa las mismas reglas de límite y sensibilidad. |
 | Edición normal de código | Una edición no sensible dentro del proyecto evita la latencia del reviewer. |
 | Shell directo excluido | `!`/`!!`, otros terminales y procesos no se interceptan. |
-| Otras tools excluidas | Actualmente solo se cubren `bash`, `write` y `edit`. |
+| Solo reviewer | Toda aprobación la decide el reviewer AI aislado; no aparece diálogo de confirmación. |
 
 ### Rutas sensibles
 
@@ -81,7 +84,7 @@ El clasificador resuelve symlinks de directorios existentes y symlinks de archiv
 
 - Modelo separado del modelo de la conversación principal;
 - sesión Pi aislada en memoria;
-- solo `read`, `grep`, `find`, `ls`;
+- revisiones normales: solo `read`, `grep`, `find`, `ls`; revisiones privadas: sin tools;
 - sin `bash`, `write` ni `edit`;
 - sin extensions, skills, prompt templates, themes ni project context files;
 - thinking level `low`;
@@ -175,11 +178,13 @@ Model/timeout: `environment > trusted project > global > default`
 
 Policy: `default + global + trusted project + environment`
 
+Review rules usan un floor monotónico: el proyecto trusted solo puede reforzar la protección global (`off < private-only < outside-or-private < always`).
+
 ## Instalación y actualización
 
 ```bash
 pi install npm:pi-approval-guardian
-pi install npm:pi-approval-guardian@0.2.0
+pi install npm:pi-approval-guardian@0.5.0
 pi update --extensions
 pi remove npm:pi-approval-guardian
 ```
@@ -187,7 +192,7 @@ pi remove npm:pi-approval-guardian
 Git:
 
 ```bash
-pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
+pi install git:github.com/mics8128/pi-approval-guardian@v0.5.0
 ```
 
 ## Comparación con Codex Guardian
@@ -195,8 +200,8 @@ pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
 | Capacidad | pi-approval-guardian | Codex Guardian |
 | --- | --- | --- |
 | Runtime | Extensión TypeScript para Pi | Subsistema nativo de Codex |
-| Trigger | Todo bash + write/edit selectivos | Codex approval policy |
-| Actions | Bash + archivos sensibles | Shell/exec/patch/network/MCP/permissions |
+| Trigger | Todo bash + read/search privado + write/edit selectivos | Codex approval policy |
+| Actions | Bash + acceso privado + archivos sensibles | Shell/exec/patch/network/MCP/permissions |
 | Sandbox | No; solo approval gate | Integrado con permissions/sandbox |
 | Session delta | Sí | Sí |
 | Retry | Parse/provider transitorio, máx. 3 | Parse/session seleccionados, máx. 3 |

@@ -1,9 +1,16 @@
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import {
+	lstatSync,
+	readdirSync,
+	readlinkSync,
+	realpathSync,
+	type Dirent,
+} from "node:fs";
 import {
 	basename,
 	dirname,
 	isAbsolute,
 	join,
+	matchesGlob,
 	relative,
 	resolve,
 	sep,
@@ -107,6 +114,8 @@ const PRIVATE_READ_BASENAMES = new Set([
 	"login data",
 	"logins.json",
 	"key4.db",
+	"nuget.config",
+	"credentials.tfrc.json",
 	"credentials",
 	"credentials.json",
 	"secrets.json",
@@ -143,6 +152,11 @@ const EXTERNAL_PRIVATE_SEGMENTS = new Set([
 	"keepass",
 	"keepassxc",
 	"wireguard",
+	"openvpn",
+	".openvpn",
+	".terraform.d",
+	".gem",
+	".bundle",
 ]);
 const EXTERNAL_PRIVATE_CONFIG_SEGMENTS = new Set([
 	"gcloud",
@@ -150,6 +164,13 @@ const EXTERNAL_PRIVATE_CONFIG_SEGMENTS = new Set([
 	"glab",
 	"op",
 	"rclone",
+	"hub",
+	"google-chrome",
+	"chromium",
+	"bravesoftware",
+	"microsoft-edge",
+	"sops",
+	"age",
 ]);
 const PRIVATE_PATH_FRAGMENTS = [
 	"/library/application support/google/chrome/",
@@ -176,13 +197,25 @@ const PRIVATE_PATH_FRAGMENTS = [
 	"/etc/ssl/private/",
 	"/etc/networkmanager/system-connections/",
 	"/etc/wireguard/",
+	"/etc/openvpn/",
+	"/var/lib/private/",
 ];
-const PRIVATE_READ_SUFFIXES = [".pem", ".key", ".p12", ".pfx", ".tfvars"];
+const PRIVATE_READ_SUFFIXES = [
+	".pem",
+	".key",
+	".p12",
+	".pfx",
+	".jks",
+	".keystore",
+	".kdbx",
+	".tfvars",
+];
 
 export interface MutationReviewTarget {
 	absolutePath: string;
 	outsideProject: boolean;
 	sensitive: boolean;
+	private: boolean;
 	reasons: string[];
 }
 
@@ -204,7 +237,9 @@ export function classifyMutationPath(
 		rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 	const normalizedSegments = absolutePath.split(/[\\/]+/).filter(Boolean);
 	const file = basename(absolutePath).toLowerCase();
+	const privatePath = classifyReadPath(path, cwd).private;
 	const sensitive =
+		privatePath ||
 		SENSITIVE_BASENAMES.has(file) ||
 		file.startsWith(".env.") ||
 		SHELL_PROFILE_PATTERN.test(file) ||
@@ -216,7 +251,13 @@ export function classifyMutationPath(
 		...(outsideProject ? ["outside project"] : []),
 		...(sensitive ? ["sensitive path"] : []),
 	];
-	return { absolutePath, outsideProject, sensitive, reasons };
+	return {
+		absolutePath,
+		outsideProject,
+		sensitive,
+		private: privatePath,
+		reasons,
+	};
 }
 
 export function shouldReviewMutation(path: string, cwd: string): boolean {
@@ -229,12 +270,17 @@ export function shouldReviewMutation(path: string, cwd: string): boolean {
 export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 	const windowsAbsolute = /^[a-z]:[\\/]/i.test(path) || /^\\\\/.test(path);
 	const windowsCwd = /^[a-z]:[\\/]/i.test(cwd) || /^\\\\/.test(cwd);
-	const absolutePath = windowsAbsolute
-		? win32.normalize(path).replace(/\\/g, "/")
-		: canonicalizePath(resolve(cwd, path));
-	const projectRoot = windowsCwd
-		? win32.normalize(cwd).replace(/\\/g, "/")
-		: canonicalizePath(resolve(cwd));
+	const nativeWindowsPath = process.platform === "win32" && windowsAbsolute;
+	const absolutePath = nativeWindowsPath
+		? canonicalizePath(resolve(cwd, path))
+		: windowsAbsolute
+			? win32.normalize(path).replace(/\\/g, "/")
+			: canonicalizePath(resolve(cwd, path));
+	const projectRoot = process.platform === "win32" && windowsCwd
+		? canonicalizePath(resolve(cwd))
+		: windowsCwd
+			? win32.normalize(cwd).replace(/\\/g, "/")
+			: canonicalizePath(resolve(cwd));
 	let rel: string;
 	if (windowsAbsolute && windowsCwd) {
 		rel = win32.relative(projectRoot, absolutePath);
@@ -244,7 +290,10 @@ export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 		rel = relative(projectRoot, absolutePath);
 	}
 	const outsideProject = windowsAbsolute
-		? rel === ".." || rel.startsWith("../") || win32.isAbsolute(rel)
+		? rel === ".." ||
+			rel.startsWith("../") ||
+			rel.startsWith("..\\") ||
+			win32.isAbsolute(rel)
 		: rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 	const normalizedSegments = absolutePath
 		.split(/[\\/]+/)
@@ -302,6 +351,80 @@ export function requiresExplicitReadAuthorization(
 	cwd: string,
 ): boolean {
 	return classifyReadPath(path, cwd).private;
+}
+
+const GREP_SCOPE_SKIP_DIRECTORIES = new Set([
+	".git",
+	"node_modules",
+	"vendor",
+	"dist",
+	"build",
+	"target",
+]);
+
+export function directoryMayContainPrivatePath(
+	path: string,
+	cwd: string,
+	glob?: string,
+	maxEntries = 10_000,
+): boolean {
+	const root = classifyReadPath(path, cwd);
+	let rootStat: ReturnType<typeof lstatSync>;
+	try {
+		rootStat = lstatSync(root.absolutePath);
+	} catch {
+		return root.private;
+	}
+	if (!rootStat.isDirectory()) return root.private && globMatches(path, glob);
+	const pending = [{ directory: root.absolutePath, privateAncestor: root.private }];
+	const visited = new Set<string>();
+	let scanned = 0;
+	while (pending.length > 0) {
+		const current = pending.pop();
+		if (!current) break;
+		let canonical: string;
+		try {
+			canonical = realpathSync(current.directory);
+		} catch {
+			continue;
+		}
+		if (visited.has(canonical)) continue;
+		visited.add(canonical);
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(current.directory, { withFileTypes: true });
+		} catch {
+			if (current.privateAncestor) return true;
+			continue;
+		}
+		for (const entry of entries) {
+			scanned++;
+			if (scanned > maxEntries) return true;
+			const child = join(current.directory, entry.name);
+			const childPrivate =
+				current.privateAncestor || classifyReadPath(child, cwd).private;
+			if (entry.isDirectory()) {
+				if (!GREP_SCOPE_SKIP_DIRECTORIES.has(entry.name.toLowerCase())) {
+					pending.push({ directory: child, privateAncestor: childPrivate });
+				}
+				continue;
+			}
+			const relativeChild = relative(root.absolutePath, child).replace(/\\/g, "/");
+			if (childPrivate && globMatches(relativeChild, glob)) return true;
+		}
+	}
+	return false;
+}
+
+function globMatches(path: string, glob?: string): boolean {
+	if (!glob) return true;
+	if (glob === "*" || glob === "**" || glob === "**/*" || glob === "*.*")
+		return true;
+	try {
+		return matchesGlob(path, glob) || matchesGlob(basename(path), glob);
+	} catch {
+		return true;
+	}
 }
 
 function canonicalizePath(path: string): string {

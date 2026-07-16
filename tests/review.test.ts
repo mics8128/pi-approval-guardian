@@ -131,10 +131,24 @@ test("accepts strict and prose-wrapped JSON", () => {
 	);
 });
 
-test("rejects malformed reviewer output", () => {
+test("rejects malformed or internally contradictory reviewer output", () => {
 	assert.throws(() => parseGuardianAssessment("allow"), /valid JSON/);
 	assert.throws(
 		() => parseGuardianAssessment('{"outcome":"maybe"}'),
 		/valid outcome/,
+	);
+	assert.throws(
+		() =>
+			parseGuardianAssessment(
+				'{"risk_level":"critical","user_authorization":"high","outcome":"allow"}',
+			),
+		/critical risk/,
+	);
+	assert.throws(
+		() =>
+			parseGuardianAssessment(
+				'{"risk_level":"high","user_authorization":"unknown","outcome":"allow"}',
+			),
+		/sufficient authorization/,
 	);
 });

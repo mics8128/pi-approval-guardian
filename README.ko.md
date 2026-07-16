@@ -4,7 +4,7 @@
 
 **Pi를 위한 fail-closed Codex Guardian 스타일 자동 승인 게이트.**
 
-에이전트가 실행하는 모든 `bash`와 프로젝트 외부/민감 경로의 `write`, `edit`를 독립 reviewer model이 실행 전에 검토합니다.
+모든 agent `bash`, 비공개 `read`/`grep`, 프로젝트 외부 또는 비공개 경로의 `write`/`edit`를 독립 reviewer model이 실행 전에 검토합니다.
 
 [![npm version](https://img.shields.io/npm/v/pi-approval-guardian.svg)](https://www.npmjs.com/package/pi-approval-guardian)
 [![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions)
@@ -39,11 +39,11 @@ Pi를 재시작하거나 `/reload` 후 `/approval-guardian`을 실행하세요.
 
 ```text
 Pi agent tool call
-  ├─ 일반 프로젝트 내부 source edit ─────────► 정상 실행
-  └─ bash / sensitive write / sensitive edit
+  ├─ 일반 source edit / read ────────────────► 정상 실행
+  └─ bash / private read or grep / sensitive mutation
                   ▼
        isolated Guardian reviewer
-       read · grep · find · ls only
+       normal: read · grep · find · ls only; private-data: no tools
                   ▼
        명시적 allow만 실행, 나머지는 block
 ```
@@ -57,11 +57,14 @@ Pi agent tool call
 | 기능 | 동작 |
 | --- | --- |
 | 모든 agent `bash` | 실행 전에 항상 검토합니다. |
+| 비공개 `read`/`hypa_read` | transcript에 명시적 high authorization이 있을 때만 허용합니다. |
+| `grep` | path, glob, 검색 범위를 포함해 항상 검토합니다. |
+| 미설정 path tool | 문자열 `path`가 있으면 기본 `private-only`입니다. |
 | 민감 `write` | canonical target이 프로젝트 외부이거나 민감 규칙과 일치할 때 검토합니다. |
 | 민감 `edit` | `write`와 같은 경계/민감 규칙을 사용합니다. |
 | 일반 source edit | 프로젝트 내부의 비민감 수정은 reviewer 지연 없이 실행합니다. |
 | Direct shell 제외 | 사용자의 `!`/`!!`, 다른 terminal/process는 가로채지 않습니다. |
-| 기타 tools 제외 | 현재 `bash`, `write`, `edit`만 처리합니다. |
+| Reviewer only | 모든 승인은 격리 AI reviewer가 판단하며 사용자 확인 창은 표시하지 않습니다. |
 
 ### 민감 경로
 
@@ -80,7 +83,7 @@ Pi agent tool call
 ### Reviewer 격리
 
 - 메인 대화와 독립된 model/in-memory session;
-- `read`, `grep`, `find`, `ls`만 활성화;
+- 일반 검토는 `read`, `grep`, `find`, `ls`만 사용하고 private-data 검토는 tools를 제공하지 않음;
 - `bash`, `write`, `edit` 없음;
 - extensions, skills, prompt templates, themes, project context files 미로딩;
 - `low` thinking level;
@@ -173,11 +176,13 @@ Model/timeout: `environment > trusted project > global > default`
 
 Policy: `default + global + trusted project + environment`
 
+Review rules는 단조 floor를 사용하며 trusted project는 global 보호를 강화만 할 수 있습니다(`off < private-only < outside-or-private < always`).
+
 ## 설치/업데이트
 
 ```bash
 pi install npm:pi-approval-guardian
-pi install npm:pi-approval-guardian@0.2.0
+pi install npm:pi-approval-guardian@0.5.0
 pi update --extensions
 pi remove npm:pi-approval-guardian
 ```
@@ -185,7 +190,7 @@ pi remove npm:pi-approval-guardian
 Git:
 
 ```bash
-pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
+pi install git:github.com/mics8128/pi-approval-guardian@v0.5.0
 ```
 
 ## Codex Guardian 비교
@@ -193,8 +198,8 @@ pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
 | 기능 | pi-approval-guardian | Codex Guardian |
 | --- | --- | --- |
 | Runtime | Pi TypeScript extension | Native Codex subsystem |
-| Trigger | 모든 agent bash + 선택적 write/edit | Codex approval policy |
-| Actions | Bash + sensitive files | Shell/exec/patch/network/MCP/permissions |
+| Trigger | 모든 agent bash + private read/search + 선택적 write/edit | Codex approval policy |
+| Actions | Bash + private-data access + sensitive files | Shell/exec/patch/network/MCP/permissions |
 | Sandbox | 없음, approval gate만 | Codex permissions/sandbox 통합 |
 | Session delta | 지원 | 지원 |
 | Retry | parse/transient provider 최대 3 | selected parse/session 최대 3 |

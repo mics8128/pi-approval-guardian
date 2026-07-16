@@ -76,7 +76,7 @@ npm view pi-approval-guardian name version dist-tags repository --json
 pi install npm:pi-approval-guardian@<version>
 ```
 
-Start a clean Pi session and run a harmless `printf` test plus a controlled denied-action test before moving the release tag.
+Start a clean Pi session and run a harmless `printf` test plus a controlled denied-action test. For the bootstrap release, create and push the version tag only after these checks. The publish workflow detects an already-published immutable version and skips republishing it; later versions are published by OIDC when their tag is pushed.
 
 ## Versioning
 
@@ -136,11 +136,22 @@ Once trusted publishing is proven, configure npm package publishing access to re
 - [ ] Run `npm run package:check` and inspect every packed file.
 - [ ] Run `npm run publish:check`.
 - [ ] Confirm the Git worktree is clean.
-- [ ] Create and push the version tag.
-- [ ] Publish interactively or through the trusted-publishing workflow.
-- [ ] Verify npm metadata and provenance.
+- [ ] For the first release: publish interactively, verify/install/smoke-test, then create and push the tag.
+- [ ] For later releases: create and push the version tag so the trusted-publishing workflow publishes it.
+- [ ] Verify npm metadata and provenance when available.
 - [ ] Install the exact published version in a clean Pi environment.
 - [ ] Run allow, deny, timeout/failure-message, and sensitive-path smoke tests.
+
+## pi.dev package gallery
+
+`pi.dev/packages` automatically indexes public npm packages whose keywords include `pi-package`; no separate submission is required. Before publishing, confirm:
+
+- `package.json#keywords` contains `pi-package`;
+- `package.json#pi.extensions` points to `./extensions/index.ts`;
+- `pi -e .` loads the local package successfully;
+- the packed file list contains no credentials or local configuration.
+
+After npm publication and registry verification, allow time for the gallery index to refresh, then verify the package appears on `https://pi.dev/packages` and that its installation command resolves.
 
 ## Emergency handling
 

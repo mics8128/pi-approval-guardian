@@ -1,7 +1,7 @@
 {
   "name": "pi-approval-guardian",
-  "version": "0.4.0",
-  "description": "A fail-closed approval gate for Pi that reviews agent shell actions and sensitive file mutations with an isolated risk model.",
+  "version": "0.5.0",
+  "description": "A fail-closed Pi approval gate that reviews shell actions, private data access, and sensitive file mutations with an isolated risk model.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -48,8 +48,8 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=0.80.7 <0.81.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.7 <0.81.0"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.80.7",

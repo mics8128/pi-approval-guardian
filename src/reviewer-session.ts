@@ -54,6 +54,7 @@ export interface ReviewerSessionOptions {
 	cwd: string;
 	systemPrompt: string;
 	timeoutMs: number;
+	tools?: Array<"read" | "grep" | "find" | "ls">;
 }
 
 // Session lifecycle, retry, deadline, and transcript cursor state are cohesive here.
@@ -316,7 +317,7 @@ export class ReviewerSessionController {
 			modelRegistry: this.options.modelRegistry,
 			model: this.options.model,
 			thinkingLevel: "low",
-			tools: ["read", "grep", "find", "ls"],
+			tools: this.options.tools ?? ["read", "grep", "find", "ls"],
 			resourceLoader,
 			sessionManager: SessionManager.inMemory(this.options.cwd),
 			settingsManager,

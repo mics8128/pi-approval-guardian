@@ -33,7 +33,7 @@ Pi agent tool call
                          │
                          ▼
               isolated Guardian reviewer
-              read · grep · find · ls only
+              normal: read · grep · find · ls; private-data: no tools
                          │
              ┌───────────┴───────────┐
              ▼                       ▼
@@ -70,7 +70,7 @@ Create `~/.pi/agent/approval-guardian.json`:
     "bash.command": "always",
     "read.path": "private-only",
     "hypa_read.path": "private-only",
-    "grep.path": "private-only",
+    "grep.path": "always",
     "write.path": "outside-or-private",
     "edit.path": "outside-or-private"
   }
@@ -174,7 +174,7 @@ A sensitive classification does not automatically deny the mutation. It requires
 | --- | --- |
 | Dedicated model | Reviewer model is independent of the model selected for the main Pi conversation. |
 | In-memory session | Reviewer history is kept in an isolated in-memory Pi session. |
-| Restricted tools | Only `read`, `grep`, `find`, and `ls` are enabled. |
+| Restricted tools | Normal reviews enable only `read`, `grep`, `find`, and `ls`; private-data reviews enable no tools, so the reviewer cannot inspect the pending secret before deciding authorization. |
 | No mutation tools | Reviewer receives no `bash`, `write`, or `edit` tool. |
 | No extension recursion | Reviewer loads no extensions, skills, prompt templates, themes, or project context files. |
 | Low reasoning level | Reviewer session runs with Pi thinking level `low`. |
@@ -333,6 +333,8 @@ Policy is additive:
 default tenant policy + global policy + trusted project policy + environment policy
 ```
 
+Review rules use a monotonic floor: global rules may customize built-in defaults, while trusted project rules may only strengthen them using `off < private-only < outside-or-private < always`. A repository cannot disable a user-configured global gate.
+
 Project policy cannot remove global policy.
 
 ## Installation and upgrades
@@ -346,7 +348,7 @@ pi install npm:pi-approval-guardian
 Pinned version:
 
 ```bash
-pi install npm:pi-approval-guardian@0.2.0
+pi install npm:pi-approval-guardian@0.5.0
 ```
 
 Upgrade installed Pi packages:
@@ -364,7 +366,7 @@ pi remove npm:pi-approval-guardian
 ### Git
 
 ```bash
-pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
+pi install git:github.com/mics8128/pi-approval-guardian@v0.5.0
 ```
 
 ### Local development

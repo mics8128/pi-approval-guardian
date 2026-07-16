@@ -51,10 +51,30 @@ test("detects project paths that escape through a symlink", () => {
 	const outside = join(root, "outside");
 	mkdirSync(project);
 	mkdirSync(outside);
-	symlinkSync(outside, join(project, "linked"));
+	symlinkSync(
+		outside,
+		join(project, "linked"),
+		process.platform === "win32" ? "junction" : "dir",
+	);
 	const target = classifyMutationPath("linked/file.txt", project);
 	assert.equal(target.outsideProject, true);
 });
+
+test(
+	"detects a Windows junction from the project into a private directory",
+	{ skip: process.platform !== "win32" },
+	() => {
+		const root = mkdtempSync(join(tmpdir(), "guardian-junction-"));
+		const project = join(root, "project");
+		const privateDir = join(root, ".ssh");
+		mkdirSync(project);
+		mkdirSync(privateDir);
+		symlinkSync(privateDir, join(project, "linked"), "junction");
+		const target = classifyReadPath("linked/config", project);
+		assert.equal(target.private, true);
+		assert.equal(target.outsideProject, true);
+	},
+);
 
 test("detects a dangling file symlink that writes outside the project", () => {
 	const root = mkdtempSync(join(tmpdir(), "guardian-dangling-"));
@@ -62,7 +82,11 @@ test("detects a dangling file symlink that writes outside the project", () => {
 	const outside = join(root, "outside");
 	mkdirSync(project);
 	mkdirSync(outside);
-	symlinkSync(join(outside, "new-file.txt"), join(project, "output.txt"));
+	symlinkSync(
+		join(outside, "new-file.txt"),
+		join(project, "output.txt"),
+		"file",
+	);
 	const target = classifyMutationPath("output.txt", project);
 	assert.equal(target.outsideProject, true);
 	assert.equal(
@@ -135,6 +159,11 @@ test("applies configured path review levels", () => {
 		"C:\\repo\\project",
 	);
 	assert.equal(windowsInside.outsideProject, false);
+	const windowsOutside = classifyReadPath(
+		"C:\\repo\\other\\README.md",
+		"C:\\repo\\project",
+	);
+	assert.equal(windowsOutside.outsideProject, true);
 	const ordinaryOutside = classifyReadPath("../other/README.md", "/repo/project");
 	const privateInside = classifyReadPath(".env", "/repo/project");
 	assert.equal(shouldReviewPath("always", ordinaryOutside), true);

@@ -182,6 +182,18 @@ export function parseGuardianAssessment(text: string): GuardianAssessment {
 	} else {
 		rationale = "Auto-review denied the action without a rationale.";
 	}
+	if (payload.outcome === "allow" && risk === "critical") {
+		throw new Error("reviewer returned an allow outcome for critical risk");
+	}
+	if (
+		payload.outcome === "allow" &&
+		risk === "high" &&
+		(authorization === "unknown" || authorization === "low")
+	) {
+		throw new Error(
+			"reviewer returned a high-risk allow without sufficient authorization",
+		);
+	}
 	return {
 		risk_level: risk,
 		user_authorization: authorization,

@@ -4,7 +4,7 @@
 
 **Pi 向けの fail-closed な Codex Guardian スタイル自動承認ゲート。**
 
-エージェントが発行するすべての `bash` と、プロジェクト外または機密パスへの `write` / `edit` を、実行前に独立 reviewer model で審査します。
+すべての agent `bash`、機密 `read` / `grep`、およびプロジェクト外・機密パスへの `write` / `edit` を独立 reviewer model で実行前に審査します。
 
 [![npm version](https://img.shields.io/npm/v/pi-approval-guardian.svg)](https://www.npmjs.com/package/pi-approval-guardian)
 [![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions)
@@ -39,11 +39,11 @@ Pi を再起動するか `/reload` を実行し、`/approval-guardian` で状態
 
 ```text
 Pi agent tool call
-  ├─ 通常のプロジェクト内 source edit ───────► そのまま実行
-  └─ bash / sensitive write / sensitive edit
+  ├─ 通常の source edit / read ──────────────► そのまま実行
+  └─ bash / private read or grep / sensitive mutation
                   ▼
        isolated Guardian reviewer
-       read · grep · find · ls only
+       normal: read · grep · find · ls only; private-data: no tools
                   ▼
        明示的な allow のみ実行、その他は block
 ```
@@ -57,11 +57,14 @@ Pi agent tool call
 | 機能 | 動作 |
 | --- | --- |
 | すべての agent `bash` | 実行前に必ず審査。 |
+| 機密 `read` / `hypa_read` | transcript に明示的な high authorization がある場合のみ許可。 |
+| `grep` | path、glob、検索範囲を含め常に審査。 |
+| 未設定の path tool | 文字列 `path` があれば既定で `private-only`。 |
 | 機密 `write` | canonical path がプロジェクト外、または機密ルール一致時に審査。 |
 | 機密 `edit` | `write` と同じ境界・機密ルール。 |
 | 通常の source edit | プロジェクト内かつ非機密なら reviewer を通さない。 |
 | Direct shell | ユーザーの `!` / `!!`、別 terminal、別 process は対象外。 |
-| その他の tools | 現在は `bash`、`write`、`edit` のみ。 |
+| Reviewer only | すべて隔離 AI reviewer が判断し、ユーザー確認 dialog は表示しない。 |
 
 ### 機密パス
 
@@ -79,7 +82,7 @@ Pi agent tool call
 
 - メイン会話とは別の model；
 - in-memory session；
-- `read`、`grep`、`find`、`ls` のみ；
+- 通常審査は `read`、`grep`、`find`、`ls` のみ。private-data 審査は tools なし；
 - `bash`、`write`、`edit` なし；
 - extensions、skills、prompt templates、themes、project context files を読み込まない；
 - scripts、package scripts、対象ファイル、設定、repository metadata を read-only で調査可能；
@@ -171,11 +174,13 @@ Model/timeout：`environment > trusted project > global > default`
 
 Policy：`default + global + trusted project + environment`
 
+Review rules は単調 floor を使い、trusted project は global 保護を強化のみ可能です（`off < private-only < outside-or-private < always`）。
+
 ## インストール・更新
 
 ```bash
 pi install npm:pi-approval-guardian
-pi install npm:pi-approval-guardian@0.2.0
+pi install npm:pi-approval-guardian@0.5.0
 pi update --extensions
 pi remove npm:pi-approval-guardian
 ```
@@ -183,7 +188,7 @@ pi remove npm:pi-approval-guardian
 Git：
 
 ```bash
-pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
+pi install git:github.com/mics8128/pi-approval-guardian@v0.5.0
 ```
 
 ## Codex Guardian との比較
@@ -191,8 +196,8 @@ pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
 | 能力 | pi-approval-guardian | Codex Guardian |
 | --- | --- | --- |
 | Runtime | Pi TypeScript extension | Native Codex subsystem |
-| Trigger | 全 agent bash、選択的 write/edit | Codex approval policy |
-| Actions | Bash + sensitive files | Shell/exec/patch/network/MCP/permissions |
+| Trigger | 全 agent bash、private read/search、選択的 write/edit | Codex approval policy |
+| Actions | Bash + private-data access + sensitive files | Shell/exec/patch/network/MCP/permissions |
 | Sandbox | なし、approval gate のみ | Codex sandbox/permissions と統合 |
 | Session delta | あり | あり |
 | Retry | parse/transient provider 最大 3 | selected parse/session 最大 3 |

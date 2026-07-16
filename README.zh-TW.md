@@ -4,7 +4,7 @@
 
 **為 Pi 提供 fail-closed、Codex Guardian 風格的自動核准閘門。**
 
-在執行前，以隔離的 reviewer model 審查所有 agent 發出的 `bash`，以及專案外／敏感路徑的 `write`、`edit`。
+在執行前，以隔離的 reviewer model 審查所有 agent `bash`、私密 `read`／`grep`，以及專案外或私密路徑的 `write`／`edit`。
 
 [![npm version](https://img.shields.io/npm/v/pi-approval-guardian.svg)](https://www.npmjs.com/package/pi-approval-guardian)
 [![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions)
@@ -25,11 +25,11 @@ Coding agent 需要 shell 權限，但可能誤解範圍、受到不可信輸出
 
 ```text
 Pi agent tool call
-  ├─ 一般專案內 source edit ─────────────────► 正常執行
-  └─ bash／敏感 write／敏感 edit
+  ├─ 一般專案內 source edit／一般 read ──────► 正常執行
+  └─ bash／私密 read 或 grep／敏感 mutation
                   ▼
        隔離的 Guardian reviewer
-       僅有 read · grep · find · ls
+       一般審核僅有 read · grep · find · ls；私密資料審核沒有工具
                   ▼
        明確 allow 才執行；其他一律阻擋
 ```
@@ -77,6 +77,9 @@ Guardian · allowed · low risk · auth high
 | 功能 | 行為 |
 | --- | --- |
 | 所有 agent `bash` | 每一個由 Pi agent 發出的 `bash` tool call 都會先送審。 |
+| 私密 `read`／`hypa_read` | Reviewer 只有在對話中存在明確 high 授權時才能放行。 |
+| `grep` | 預設一律送審，並檢查 path、glob 與搜尋範圍。 |
+| 未設定 path tool | 有字串 `path` 參數時預設採 `private-only`。 |
 | 敏感 `write` | 目標位於專案外或命中敏感路徑時送審。 |
 | 敏感 `edit` | 採用相同的專案邊界與敏感路徑規則。 |
 | 一般 source edit | 專案內且不敏感的 `write`／`edit` 不送審，避免不必要延遲。 |
@@ -84,7 +87,7 @@ Guardian · allowed · low risk · auth high
 | Fail closed | deny、timeout、provider failure、錯誤 JSON、取消、model/auth 不可用、circuit open 全部阻擋。 |
 | 禁止 workaround | 明確拒絕後會要求 agent 不得透過間接 command 或規避 policy 重試。 |
 | 不涵蓋直接 shell | 使用者透過 `!`／`!!`、其他 terminal 或其他程式執行的 command 不會被攔截。 |
-| 其他工具 | 目前不攔截 `bash`、`write`、`edit` 以外的 Pi tools。 |
+| Reviewer-only | 所有核准都由隔離 AI reviewer 完成，不跳出使用者確認視窗。 |
 
 ### 敏感路徑
 
@@ -111,7 +114,7 @@ Guardian · allowed · low risk · auth high
 
 - 使用獨立 model，不切換主對話 model。
 - 使用隔離的 in-memory Pi session。
-- 只啟用 `read`、`grep`、`find`、`ls`。
+- 一般審核只啟用 `read`、`grep`、`find`、`ls`；私密資料審核不提供任何工具。
 - 不提供 `bash`、`write`、`edit`。
 - 不載入 extensions、skills、prompt templates、themes 或 project context files。
 - 使用 `low` thinking level。
@@ -231,11 +234,13 @@ Policy 會累加：
 default + global + trusted project + environment
 ```
 
+Review rules 採單調 floor：global 可調整預設值，trusted project 只能提高層級，不能降低使用者的 global 保護（`off < private-only < outside-or-private < always`）。
+
 ## 安裝、更新、移除
 
 ```bash
 pi install npm:pi-approval-guardian
-pi install npm:pi-approval-guardian@0.2.0
+pi install npm:pi-approval-guardian@0.5.0
 pi update --extensions
 pi remove npm:pi-approval-guardian
 ```
@@ -243,7 +248,7 @@ pi remove npm:pi-approval-guardian
 Git 安裝：
 
 ```bash
-pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
+pi install git:github.com/mics8128/pi-approval-guardian@v0.5.0
 ```
 
 本機開發：
@@ -262,10 +267,10 @@ pi install "$(pwd)"
 | 能力 | pi-approval-guardian | Codex Guardian |
 | --- | --- | --- |
 | Runtime | Pi TypeScript extension | Codex native subsystem |
-| 觸發 | 所有 agent `bash`；選擇性 `write`／`edit` | 由 Codex approval policy 路由的 requests |
-| Action types | Bash + 敏感檔案 mutation | Shell、exec、execve、patch、network、MCP、permissions |
+| 觸發 | 所有 agent `bash`、私密 read/search、選擇性 `write`／`edit` | 由 Codex approval policy 路由的 requests |
+| Action types | Bash + 私密資料存取 + 敏感檔案 mutation | Shell、exec、execve、patch、network、MCP、permissions |
 | Sandbox 整合 | 無，僅 approval gate | 整合 Codex permission/sandbox |
-| Reviewer tools | Pi `read`／`grep`／`find`／`ls` | Native read-only profile |
+| Reviewer tools | 一般審核用 Pi read-only tools；私密審核無 tools | Native read-only profile |
 | Session delta | 有 | 有 |
 | Retry | Parse／暫時性 provider failure 最多 3 次 | 選定 parse／session failures 最多 3 次 |
 | Structured output | Prompt contract + parser | JSON Schema + parser |

@@ -18,7 +18,7 @@ export const DEFAULT_REVIEW_RULES: Readonly<Record<string, ReviewLevel>> = {
 	"bash.command": "always",
 	"read.path": "private-only",
 	"hypa_read.path": "private-only",
-	"grep.path": "private-only",
+	"grep.path": "always",
 	"write.path": "outside-or-private",
 	"edit.path": "outside-or-private",
 };
@@ -56,6 +56,17 @@ export function loadGuardianConfig(
 	const globalPath = join(agentDir, CONFIG_FILE_NAME);
 	const projectPath = join(options.cwd, CONFIG_DIR_NAME, CONFIG_FILE_NAME);
 	const warnings: string[] = [];
+	if (env[MODEL_ENV] !== undefined && !isModelSpecString(env[MODEL_ENV])) {
+		warnings.push(`Invalid ${MODEL_ENV}: expected provider/model.`);
+	}
+	if (
+		env[TIMEOUT_ENV] !== undefined &&
+		firstTimeout(env[TIMEOUT_ENV]) === undefined
+	) {
+		warnings.push(
+			`Invalid ${TIMEOUT_ENV}: expected an integer from 1000 to 300000.`,
+		);
+	}
 	const globalConfig = readConfigFile(globalPath, warnings);
 	const projectConfig = options.projectTrusted
 		? readConfigFile(projectPath, warnings)
@@ -77,11 +88,17 @@ export function loadGuardianConfig(
 		)
 		.map((value) => value.trim());
 
-	const review = {
-		...DEFAULT_REVIEW_RULES,
-		...parseReviewRules(globalConfig.review, globalPath, warnings),
-		...parseReviewRules(projectConfig.review, projectPath, warnings),
-	};
+	const globalReview = parseReviewRules(
+		globalConfig.review,
+		globalPath,
+		warnings,
+	);
+	const projectReview = parseReviewRules(
+		projectConfig.review,
+		projectPath,
+		warnings,
+	);
+	const review = mergeReviewRules(globalReview, projectReview);
 
 	return {
 		model,
@@ -103,12 +120,60 @@ function readConfigFile(path: string, warnings: string[]): GuardianConfigFile {
 			warnings.push(`Ignoring ${path}: expected a JSON object.`);
 			return {};
 		}
-		return parsed as GuardianConfigFile;
+		const config = parsed as GuardianConfigFile;
+		validateConfigFile(config, path, warnings);
+		return config;
 	} catch (error) {
 		warnings.push(
 			`Ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		return {};
+	}
+}
+
+const REVIEW_LEVEL_RANK: Record<ReviewLevel, number> = {
+	off: 0,
+	"private-only": 1,
+	"outside-or-private": 2,
+	always: 3,
+};
+
+function mergeReviewRules(
+	globalRules: Record<string, ReviewLevel>,
+	projectRules: Record<string, ReviewLevel>,
+): Record<string, ReviewLevel> {
+	const effective: Record<string, ReviewLevel> = {
+		...DEFAULT_REVIEW_RULES,
+		...globalRules,
+	};
+	for (const [key, projectLevel] of Object.entries(projectRules)) {
+		const floor = effective[key] ?? "private-only";
+		effective[key] =
+			REVIEW_LEVEL_RANK[projectLevel] > REVIEW_LEVEL_RANK[floor]
+				? projectLevel
+				: floor;
+	}
+	return effective;
+}
+
+function validateConfigFile(
+	config: GuardianConfigFile,
+	path: string,
+	warnings: string[],
+): void {
+	if (config.model !== undefined && !isModelSpecString(config.model)) {
+		warnings.push(`Invalid model in ${path}: expected provider/model string.`);
+	}
+	if (
+		config.timeoutMs !== undefined &&
+		firstTimeout(config.timeoutMs) === undefined
+	) {
+		warnings.push(
+			`Invalid timeoutMs in ${path}: expected an integer from 1000 to 300000.`,
+		);
+	}
+	if (config.policy !== undefined && typeof config.policy !== "string") {
+		warnings.push(`Invalid policy in ${path}: expected a string.`);
 	}
 }
 
@@ -136,6 +201,13 @@ function parseReviewRules(
 		}
 	}
 	return rules;
+}
+
+function isModelSpecString(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		/^[^/\s]+\/[^/\s]+$/.test(value.trim())
+	);
 }
 
 function firstString(...values: unknown[]): string | undefined {
