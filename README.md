@@ -1,176 +1,500 @@
-# pi-codex-reviewer
+<div align="center">
 
-一個採用 OpenAI Codex Guardian／Auto-review 邏輯的 Pi bash approval gate。
+# pi-approval-guardian
 
-每當 Pi 準備執行 `bash` tool，插件會先把目前對話、近期工具呼叫與結果、工作目錄及待執行 command 送給獨立 reviewer model。只有 reviewer 明確回傳 `{"outcome":"allow"}` 時才會執行；拒絕、timeout、API error、model 不存在、認證失敗或回傳格式錯誤時一律阻擋。
+**A fail-closed, Codex Guardian-style automatic approval gate for Pi.**
 
-## 行為
+Review every agent-issued `bash` action and selected sensitive/out-of-project `write` and `edit` mutations with an isolated reviewer model before execution.
 
-- 自動攔截 Pi 的 `bash` tool calls。
-- 不攔截使用者直接透過 `!`／`!!` 執行的 shell command；只審查 Pi agent 發出的 `bash` tool call。
-- 使用獨立 reviewer model，不會切換目前對話使用中的模型。
-- 傳送使用者意圖、assistant 訊息、近期 tool calls 與 tool results 作為授權前後文。
-- 對話內容和 command 都被標示為不可信 evidence，避免 prompt injection 直接要求 reviewer 放行。
-- 依 Codex Guardian 的四級風險判定：`low`、`medium`、`high`、`critical`。
-- 依前後文判定使用者授權程度：`unknown`、`low`、`medium`、`high`。
-- 採 fail-closed：沒有明確 `allow` 就不執行。
-- 被拒絕後會要求 Pi 不得透過 workaround 或間接 command 繞過。
+[![npm version](https://img.shields.io/npm/v/pi-approval-guardian.svg)](https://www.npmjs.com/package/pi-approval-guardian)
+[![CI](https://github.com/mics8128/pi-approval-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/mics8128/pi-approval-guardian/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Pi package](https://img.shields.io/badge/Pi-package-6c5ce7)](https://pi.dev/)
 
-## Codex 相容邏輯
+**English** · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md)
 
-本插件依照 Codex Guardian 的公開實作重現核心流程：
+</div>
 
-1. 保留人類對話，以及近期 tool call／result evidence。
-2. 將 transcript 與 planned action 放在明確分隔區塊。
-3. 將所有 transcript、工具輸出與 command 視為不可信資料，而非 reviewer instructions。
-4. 先判斷 intrinsic risk 與 user authorization，再決定 allow／deny。
-5. Low／medium risk 原則上放行；high risk 必須有足夠授權及有限 blast radius；critical risk 拒絕。
-6. Reviewer 必須回傳嚴格 JSON。
-7. Timeout、review failure 與 JSON parse failure 全部 fail closed。
+> [!IMPORTANT]
+> Pi extensions execute with your user permissions. Review this package's source before installation. This extension is an approval gate, not an operating-system sandbox.
 
-為避免對話無限增長，前後文採用與 Codex Guardian 類似的分離額度：message 與 tool evidence 各自保留，單筆內容會截斷，並優先保留第一筆／最新的使用者訊息及最新的非使用者 evidence。
+## Why this exists
 
-參考的 Codex 原始碼版本：`cbc83d961e8132bfff4d340ab8342d181b79e95e`
+Coding agents need shell access, but an agent can misunderstand scope, follow prompt injection from untrusted output, choose a destructive implementation, or mutate a sensitive file that the user never authorized.
 
-- [Guardian prompt 與 transcript selection](https://github.com/openai/codex/blob/cbc83d961e8132bfff4d340ab8342d181b79e95e/codex-rs/core/src/guardian/prompt.rs)
-- [Guardian policy template](https://github.com/openai/codex/blob/cbc83d961e8132bfff4d340ab8342d181b79e95e/codex-rs/core/src/guardian/policy_template.md)
-- [Default risk policy](https://github.com/openai/codex/blob/cbc83d961e8132bfff4d340ab8342d181b79e95e/codex-rs/core/src/guardian/policy.md)
-- [Fail-closed review flow](https://github.com/openai/codex/blob/cbc83d961e8132bfff4d340ab8342d181b79e95e/codex-rs/core/src/guardian/review.rs)
-
-## 安裝
-
-> Pi extension 會以你的使用者權限執行。安裝前請先檢查原始碼。
-
-### 本機安裝
-
-```bash
-npm install
-pi install "$(pwd)"
-```
-
-只安裝到目前專案：
-
-```bash
-pi install -l "$(pwd)"
-```
-
-### 直接試跑
-
-```bash
-npm install
-pi -e ./extensions/index.ts
-```
-
-### Git 安裝
-
-發布到 GitHub 後：
-
-```bash
-pi install git:github.com/mics8128/pi-codex-reviewer@v0.1.0
-```
-
-也可以直接安裝最新版：
-
-```bash
-pi install git:github.com/mics8128/pi-codex-reviewer
-```
-
-## Reviewer model
-
-預設使用：
+`pi-approval-guardian` adds a separate automatic reviewer between selected Pi tool calls and execution:
 
 ```text
-openai-codex/codex-auto-review
+Pi agent tool call
+        │
+        ├─ ordinary in-project source edit ───────────────► execute normally
+        │
+        └─ bash / sensitive write / sensitive edit
+                         │
+                         ▼
+              isolated Guardian reviewer
+              read · grep · find · ls only
+                         │
+             ┌───────────┴───────────┐
+             ▼                       ▼
+      explicit allow             everything else
+         execute                 block (fail closed)
 ```
 
-這是獨立 reviewer，不受 Pi 當前 `/model` 選擇影響。Model 格式必須是 `<provider>/<model>`，且 provider 必須已透過 Pi 完成登入或 API key 設定。找不到模型或認證失敗時，所有 Pi agent bash command 都會被阻擋。
+The reviewer separately evaluates intrinsic risk and user authorization. Only a valid `{"outcome":"allow"}` permits execution.
 
-### Global 設定
+## Quick start
 
-建立 `~/.pi/agent/codex-guardian.json`：
+### Install from npm
+
+```bash
+pi install npm:pi-approval-guardian
+```
+
+Project-local installation:
+
+```bash
+pi install -l npm:pi-approval-guardian
+```
+
+### Configure a reviewer model
+
+Create `~/.pi/agent/approval-guardian.json`:
 
 ```json
 {
   "model": "llm-esapp/codex-auto-review",
   "timeoutMs": 90000,
-  "policy": "禁止任何未經明確授權的 production mutation。"
+  "policy": "Never mutate production unless the user explicitly approves the exact target and side effects."
 }
 ```
 
-### Project-local 設定
+The provider/model must already be available through Pi's model registry and authentication.
 
-建立 `<project>/.pi/codex-guardian.json`：
+### Verify
+
+Restart Pi or run `/reload`, then check:
+
+```text
+/approval-guardian
+```
+
+Harmless test:
+
+```text
+Ask Pi to run: printf '%s\n' 'guardian-ok'
+```
+
+Expected compact notification:
+
+```text
+Guardian · allowed · low risk · auth high
+```
+
+## Complete feature list
+
+### Interception and enforcement
+
+| Feature | Behavior |
+| --- | --- |
+| All agent `bash` calls | Every Pi agent-issued `bash` tool call is reviewed before execution. |
+| Sensitive `write` calls | Reviewed when the canonical target is outside the project or matches sensitive-path rules. |
+| Sensitive `edit` calls | Reviewed under the same outside-project and sensitive-path rules. |
+| Ordinary source edits | Normal in-project `write`/`edit` calls bypass the reviewer to avoid unnecessary latency. |
+| Explicit allow contract | Only a parsed reviewer response with `outcome: "allow"` executes. |
+| Fail closed | Denial, timeout, provider failure, invalid JSON, cancellation, unavailable model/auth, or open circuit blocks the action. |
+| No automatic workaround | A denial tells the agent not to retry through indirect execution or policy circumvention. |
+| Direct user shell excluded | Commands entered directly with Pi `!`/`!!`, another terminal, or another process are not intercepted. |
+| Other tools excluded | Tools other than `bash`, `write`, and `edit` are currently outside this gate. |
+
+### Sensitive-path detection
+
+`write` and `edit` are sent to the reviewer when either condition is true:
+
+1. the canonical path is outside the canonical project root; or
+2. the path is classified as sensitive.
+
+The classifier resolves existing directory symlinks and dangling file symlinks before comparing project boundaries.
+
+Sensitive categories include:
+
+| Category | Examples |
+| --- | --- |
+| Environment/secrets | `.env`, `.env.*`, `credentials.json`, `secrets.json`, `secrets/`, `credentials/` |
+| Identity/keys | `.ssh/`, `.gnupg/`, `.aws/`, `.kube/`, `authorized_keys`, `*.pem`, `*.key`, `*.p12`, `*.pfx` |
+| Shell persistence | `.zshrc`, `.zprofile`, `.zlogin`, `.bashrc`, `.bash_profile`, `.profile` |
+| Git and automation | `.git/`, Git hooks/config, `.github/`, `.gitlab-ci.yml` |
+| Pi configuration | `.pi/`, `settings.json`, `approval-guardian.json` |
+| Package execution surface | `package.json`, npm/pnpm/Yarn lockfiles |
+| Infrastructure/deployment | Terraform (`*.tf`, `*.tfvars`, `terraform/`), Kubernetes directories, Docker Compose files |
+
+A sensitive classification does not automatically deny the mutation. It requires Guardian review.
+
+### Reviewer isolation and investigation
+
+| Feature | Behavior |
+| --- | --- |
+| Dedicated model | Reviewer model is independent of the model selected for the main Pi conversation. |
+| In-memory session | Reviewer history is kept in an isolated in-memory Pi session. |
+| Restricted tools | Only `read`, `grep`, `find`, and `ls` are enabled. |
+| No mutation tools | Reviewer receives no `bash`, `write`, or `edit` tool. |
+| No extension recursion | Reviewer loads no extensions, skills, prompt templates, themes, or project context files. |
+| Low reasoning level | Reviewer session runs with Pi thinking level `low`. |
+| Local investigation | Reviewer may inspect scripts, package scripts, mutation targets, configuration, and repository metadata when risk depends on local state. |
+| Untrusted evidence | Transcript, tool arguments/results, retry reason, files, and planned action are evidence—not instructions. |
+
+The tool allowlist is **not an OS sandbox**. The reviewer still reads files with the current user's operating-system permissions.
+
+### Prompt and policy
+
+The policy is synchronized to selected concepts from OpenAI Codex Guardian commit [`03bb3b12367397e14a8facc2e018d645ff4d8e83`](https://github.com/openai/codex/tree/03bb3b12367397e14a8facc2e018d645ff4d8e83/codex-rs/core/src/guardian).
+
+Implemented policy features:
+
+- transcript/action separation with explicit delimiters;
+- prompt-injection-resistant untrusted-evidence framing;
+- four risk levels: `low`, `medium`, `high`, `critical`;
+- four authorization levels: `unknown`, `low`, `medium`, `high`;
+- low/medium actions normally allowed;
+- high-risk actions allowed only with sufficient authorization, narrow scope, and no absolute deny rule;
+- critical actions denied;
+- secret/private-data exfiltration to untrusted destinations denied even with high authorization;
+- credential probing, persistent security weakening, destructive actions, bounded Git operations, and narrow local deletion rules;
+- exact informed post-denial user approval handling;
+- optional additive organization policy;
+- strict JSON final response contract.
+
+Source references:
+
+- [Prompt construction](https://github.com/openai/codex/blob/03bb3b12367397e14a8facc2e018d645ff4d8e83/codex-rs/core/src/guardian/prompt.rs)
+- [Policy template](https://github.com/openai/codex/blob/03bb3b12367397e14a8facc2e018d645ff4d8e83/codex-rs/core/src/guardian/policy_template.md)
+- [Default tenant policy](https://github.com/openai/codex/blob/03bb3b12367397e14a8facc2e018d645ff4d8e83/codex-rs/core/src/guardian/policy.md)
+- [Review flow](https://github.com/openai/codex/blob/03bb3b12367397e14a8facc2e018d645ff4d8e83/codex-rs/core/src/guardian/review.rs)
+
+### Transcript selection and truncation
+
+| Limit | Value |
+| --- | ---: |
+| Message transcript budget | 40,000 characters |
+| Tool transcript budget | 40,000 characters |
+| Single message entry | 8,000 characters |
+| Single tool entry | 4,000 characters |
+| Planned action payload | 64,000 characters |
+| Recent non-user entries | 40 |
+
+Selection prioritizes first/latest user intent, other recent user messages when space permits, and recent assistant/tool evidence. Long entries are middle-truncated with explicit markers. Omitted history is disclosed to the reviewer.
+
+### Session reuse and transcript delta
+
+- The initial assessment sends a bounded full transcript.
+- Successful assessments advance a parent-history cursor.
+- Later assessments reuse the isolated reviewer session and send only new transcript entries plus the new action.
+- Calls are serialized, so concurrent tool calls cannot prompt the same reviewer session concurrently.
+- If branch history diverges/shrinks, or the working directory, model, timeout, or effective policy changes, the old reviewer session is disposed and a full transcript is sent.
+- Failed retry attempts discard reviewer state and retry from a fresh full transcript.
+- Session shutdown/reload disposes reviewer state and aborts an active reviewer request.
+
+### Retry and deadline behavior
+
+| Feature | Value |
+| --- | ---: |
+| Maximum attempts | 3 |
+| Initial backoff | 200 ms |
+| Backoff factor | 2× |
+| Jitter | 0.9–1.1× |
+| Default shared deadline | 90 seconds |
+| Configurable deadline range | 1–300 seconds |
+
+Retries occur for invalid assessment JSON and provider errors classified by Pi as transient (for example overload, rate limiting, transient HTTP 5xx, transport/fetch/stream failures). Quota/billing exhaustion is not treated as transient.
+
+All attempts, session startup, prompt execution, and retry waits share one deadline. Explicit allow, explicit denial, cancellation, and terminal timeout are not retried.
+
+### Failure classification
+
+The extension does not disguise infrastructure errors as policy denials:
+
+| Result | Meaning | Execution |
+| --- | --- | --- |
+| `allowed` | Reviewer explicitly returned allow | Execute |
+| `denied` | Reviewer explicitly returned deny | Block and provide no-workaround guidance |
+| `timeout` | Shared review deadline expired | Block |
+| `failure` | Model/auth/session/provider/parser failure | Block |
+| `cancelled` | Parent run, reload, or shutdown cancelled review | Block |
+| `circuit-open` | Repeated explicit denials exceeded the per-run limit | Block without another reviewer call |
+
+### Denial circuit breaker
+
+Within one Pi agent run:
+
+- 3 consecutive explicit denials open the circuit; or
+- 10 explicit denials among the latest 50 recorded reviews open the circuit.
+
+Only valid reviewer `deny` outcomes count as denials. Allow, timeout, failure, and cancellation record non-denials. When the circuit opens, the current run is aborted and later covered actions are blocked without spending another reviewer request.
+
+### Compact UI
+
+| State | Example |
+| --- | --- |
+| Reviewing | `Guardian · reviewing` |
+| Parallel/queued count | `Guardian · reviewing 2` |
+| Allowed | `Guardian · allowed · low risk · auth high` |
+| Explicit denial | `Guardian · blocked · high risk · auth low` plus rationale/action preview |
+| Timeout | `Guardian · timed out · blocked` |
+| Operational failure | `Guardian · review failed · blocked` |
+| Cancellation | `Guardian · cancelled · blocked` |
+| Circuit breaker | `Guardian · circuit open · blocked` |
+
+Run `/approval-guardian` to see the effective reviewer model, deadline, attempt limit, policy state, scope, and configuration warnings.
+
+## Configuration
+
+### Global configuration
+
+`~/.pi/agent/approval-guardian.json`:
 
 ```json
 {
   "model": "llm-esapp/codex-auto-review",
-  "policy": "此專案不得執行 terraform destroy。"
+  "timeoutMs": 90000,
+  "policy": "Never mutate production without exact informed authorization."
 }
 ```
 
-插件只有在 `ctx.isProjectTrusted()` 為 true 時才讀取 project-local 設定。Global 與 project policy 會累加，project 無法移除 global policy。
+### Project configuration
 
-### 環境變數
+`<project>/.pi/approval-guardian.json`:
+
+```json
+{
+  "model": "llm-esapp/codex-auto-review",
+  "policy": "Never execute terraform destroy in this repository."
+}
+```
+
+Project configuration is read only when Pi marks the project trusted.
+
+### Environment variables
 
 ```bash
-export PI_CODEX_GUARDIAN_MODEL="llm-esapp/codex-auto-review"
-export PI_CODEX_GUARDIAN_TIMEOUT_MS="90000"
-export PI_CODEX_GUARDIAN_POLICY='只允許讀取 production database。'
+export PI_APPROVAL_GUARDIAN_MODEL="llm-esapp/codex-auto-review"
+export PI_APPROVAL_GUARDIAN_TIMEOUT_MS="90000"
+export PI_APPROVAL_GUARDIAN_POLICY='Only read from production databases.'
 ```
 
-Model 與 timeout 的優先順序為環境變數、project config、global config、內建預設值。Policy 則依序累加 global、project、環境變數，並放在 reviewer system prompt，不能被 transcript 覆蓋。
+### Precedence
 
-可在 Pi 裡檢查實際生效設定：
+For `model` and `timeoutMs`:
 
 ```text
-/codex-guardian
+environment > trusted project config > global config > built-in default
 ```
 
-## 範例
-
-使用者明確要求刪除單一 generated cache：
+Policy is additive:
 
 ```text
-使用者：刪除這個專案的 .cache 產物
-Pi bash：rm -rf .cache
+default tenant policy + global policy + trusted project policy + environment policy
 ```
 
-Reviewer 可判定為範圍有限且已授權，因此放行。
+Project policy cannot remove global policy.
 
-未經授權的廣泛刪除：
+## Installation and upgrades
+
+### npm
+
+```bash
+pi install npm:pi-approval-guardian
+```
+
+Pinned version:
+
+```bash
+pi install npm:pi-approval-guardian@0.2.0
+```
+
+Upgrade installed Pi packages:
+
+```bash
+pi update --extensions
+```
+
+Remove:
+
+```bash
+pi remove npm:pi-approval-guardian
+```
+
+### Git
+
+```bash
+pi install git:github.com/mics8128/pi-approval-guardian@v0.2.0
+```
+
+### Local development
+
+```bash
+git clone https://github.com/mics8128/pi-approval-guardian.git
+cd pi-approval-guardian
+npm install
+pi install "$(pwd)"
+```
+
+Direct test run:
+
+```bash
+pi -e ./extensions/index.ts
+```
+
+After local changes, run `/reload` in Pi.
+
+## Examples
+
+### Narrow requested deletion
 
 ```text
-Pi bash：rm -rf ~
+User: Delete this project's generated .cache directory.
+Pi:   rm -rf .cache
 ```
 
-Reviewer 應判定為高風險或 critical，插件會回傳 blocked tool result，command 不會執行。
+The reviewer can inspect `.cache`, determine that the target is narrow/generated and authorized, then allow it.
 
-## 開發
+### Unrequested destructive command
 
-需求：Node.js 22.19 以上。
+```text
+Pi: rm -rf ~
+```
+
+Expected: high/critical risk denial and blocked execution.
+
+### Sensitive file edit
+
+```text
+User: Add this exact host alias to ~/.ssh/config.
+Pi edit: ~/.ssh/config
+```
+
+The path is outside the project and under `.ssh`, so it is reviewed. Exact informed authorization may permit the bounded edit.
+
+### Ordinary source edit
+
+```text
+Pi edit: src/review.ts
+```
+
+If it remains inside the project and does not match a sensitive rule, it executes normally without reviewer latency.
+
+## Comparison
+
+### This plugin vs current Codex Guardian
+
+| Capability | pi-approval-guardian | Codex Guardian |
+| --- | --- | --- |
+| Runtime | Pi TypeScript extension | Native Codex runtime subsystem |
+| Trigger | Every Pi agent `bash`; selected `write`/`edit` | Approval requests routed by Codex approval policy |
+| Action types | Bash + selective file mutations | Shell, exec, execve, apply patch, network, MCP, permission requests |
+| Sandbox integration | None; approval gate only | Integrated with Codex permission/sandbox architecture |
+| Reviewer tools | Pi `read`, `grep`, `find`, `ls` | Native read-only permission profile |
+| Session reuse | Yes, with Pi branch snapshot/delta | Yes, with native transcript cursor/fork state |
+| Retry | Up to 3 for parse/transient provider failures | Up to 3 for selected parse/transient session errors |
+| Deadline | Shared configurable deadline | Shared 90-second Guardian deadline |
+| Circuit breaker | 3 consecutive or 10-in-50 per Pi agent run | Equivalent upstream denial thresholds within Codex turn state |
+| Structured output | Prompt contract + defensive JSON parser | JSON schema plus defensive parser |
+| Policy configuration | Global/project/env additive policy | Managed tenant/catalog policy/template |
+| Telemetry | No Guardian analytics backend | Native assessment events and analytics |
+
+This project is **Codex Guardian-style**, not an official OpenAI component and not behaviorally identical to Codex.
+
+### This plugin vs Pi project trust vs no guard
+
+| Capability | This plugin | Pi project trust | No guard |
+| --- | ---: | ---: | ---: |
+| Reviews agent shell actions | ✅ | ❌ | ❌ |
+| Reviews sensitive/outside file mutations | ✅ | ❌ | ❌ |
+| Controls loading project-local Pi resources | ❌ | ✅ | ❌ |
+| Uses an independent risk reviewer | ✅ | ❌ | ❌ |
+| Fails closed when reviewer unavailable | ✅ | N/A | ❌ |
+| OS-level containment | ❌ | ❌ | ❌ |
+
+Use Pi project trust and this extension together; they solve different problems.
+
+## Security and privacy model
+
+- The reviewer provider receives a bounded transcript and planned action.
+- The reviewer can use read-only Pi tools to inspect local files with your user permissions.
+- Tool/file content may contain sensitive data; use a provider you trust.
+- The extension has no telemetry of its own.
+- The restricted reviewer tool list is not an operating-system sandbox.
+- Approved commands execute with Pi's normal environment and privileges.
+- The sensitive-path list is heuristic, not a comprehensive DLP policy.
+- Filesystem state may change between path classification and execution.
+- Context/action truncation can omit relevant evidence; policy tells the reviewer to become cautious when evidence is missing.
+- A model decision is probabilistic. This gate reduces risk; it does not prove safety.
+
+## Known limitations
+
+- Does not intercept direct `!`/`!!` commands, other terminals, or other processes.
+- Does not review ordinary in-project source edits.
+- Does not currently gate MCP, network, deployment, email, browser, subagent, or arbitrary custom tools.
+- Does not enforce an OS sandbox or file-read boundary.
+- Reviewer session integration paths are harder to unit-test than pure policy/path logic; use controlled smoke tests after upgrades.
+- Provider availability becomes an availability dependency because the extension intentionally fails closed.
+
+## Development
+
+Requirements: Node.js 22.19+.
 
 ```bash
 npm install
 npm run check
+npm run package:check
 ```
 
-## 專案結構
+Current checks:
+
+- strict TypeScript typecheck;
+- Node test runner for config precedence/trust;
+- prompt, transcript, policy, and parser behavior;
+- circuit-breaker thresholds;
+- outside/sensitive path classification;
+- existing and dangling symlink escape detection;
+- npm tarball preview.
+
+Project structure:
 
 ```text
-extensions/index.ts   攔截 bash、呼叫 reviewer、fail-closed gate
-src/config.ts         Global/project/env 設定載入與信任檢查
-src/review.ts         Guardian policy、context selection、prompt 與 JSON parser
-tests/*.test.ts       設定、context 與 parser 測試
-package.json          Pi package manifest
+extensions/index.ts       Pi hooks, UI, controller wiring, action interception
+src/config.ts             Global/project/environment configuration
+src/policy.ts             Synced Guardian template/default tenant policy
+src/review.ts             Action prompt, transcript budgeting, JSON parser
+src/reviewer-session.ts   Isolated session reuse, delta, retry, deadline, cleanup
+src/gate.ts               Result types, circuit breaker, sensitive path classifier
+tests/*.test.ts           Unit tests
+docs/PUBLISHING.md        Maintainer npm release guide
 ```
 
-## 隱私與限制
+## Publishing
 
-- Reviewer 會收到有限且經截斷的對話與工具前後文，其中可能包含敏感資訊；請使用你信任的 model provider。
-- Reviewer 不具備額外 tools，因此無法像完整 Codex Guardian 一樣主動執行 read-only investigation；它只能根據 Pi 已有的前後文判斷。
-- 此插件是 approval gate，不是 sandbox。獲准的 command 仍以 Pi 原本的 bash 執行環境與權限執行。
-- 本插件只控制 Pi agent 發出的 bash tool call；使用者直接輸入的 `!`／`!!` shell command、其他程式與另一個 terminal 都不會被攔截。
+The npm name `pi-approval-guardian` was available when last checked, and the local npm identity was authenticated as `mics8128`. No release is performed merely by building this repository.
 
-## License
+Maintainers: read [docs/PUBLISHING.md](docs/PUBLISHING.md) before publishing. The repository includes a GitHub Actions trusted-publishing workflow using npm OIDC and provenance.
 
-MIT
+Useful local release gates:
+
+```bash
+npm whoami
+npm view pi-approval-guardian name version
+npm run check
+npm run package:check
+npm run publish:check
+```
+
+## Contributing
+
+Issues and focused pull requests are welcome. Security-sensitive changes should include tests and should preserve fail-closed behavior.
+
+## License and third-party notices
+
+Original project code is licensed under the [MIT License](LICENSE).
+
+`src/policy.ts` contains modified and adapted portions of OpenAI Codex Guardian policy/prompt materials, which remain subject to the [Apache License 2.0](LICENSES/Apache-2.0.txt). See [NOTICE](NOTICE) for attribution and a description of modifications.
+
+“OpenAI” and “Codex” are used only to identify the upstream source and compatibility inspiration. This project is not affiliated with or endorsed by OpenAI.

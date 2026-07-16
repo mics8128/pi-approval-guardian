@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { UPSTREAM_GUARDIAN_COMMIT } from "../src/policy.ts";
 import {
 	buildGuardianPrompt,
 	buildGuardianTranscript,
 	DEFAULT_REVIEWER_MODEL,
+	GUARDIAN_POLICY,
 	parseGuardianAssessment,
 	parseModelSpec,
 	type GuardianMessage,
 } from "../src/review.ts";
+
+test("tracks the synced upstream Guardian commit", () => {
+	assert.equal(
+		UPSTREAM_GUARDIAN_COMMIT,
+		"03bb3b12367397e14a8facc2e018d645ff4d8e83",
+	);
+});
 
 test("parses the dedicated reviewer model", () => {
 	assert.deepEqual(parseModelSpec(undefined), {
@@ -49,8 +58,11 @@ test("builds a bounded transcript with intent and tool evidence", () => {
 
 test("separates untrusted transcript from the exact planned action", () => {
 	const prompt = buildGuardianPrompt({
-		command: "rm -rf .cache",
-		cwd: "/repo",
+		action: {
+			tool: "bash",
+			payload: { command: "rm -rf .cache" },
+			cwd: "/repo",
+		},
 		transcript: "[1] user: remove generated cache",
 	});
 	assert.match(prompt, /TRANSCRIPT START/);
@@ -58,6 +70,39 @@ test("separates untrusted transcript from the exact planned action", () => {
 	assert.match(prompt, /APPROVAL REQUEST START/);
 	assert.match(prompt, /"command": "rm -rf .cache"/);
 	assert.match(prompt, /"cwd": "\/repo"/);
+});
+
+test("uses the current Guardian policy and read-only investigation rules", () => {
+	assert.match(GUARDIAN_POLICY, /read, grep, find, and ls tools/);
+	assert.match(
+		GUARDIAN_POLICY,
+		/Never mutate files or execute the planned action/,
+	);
+	assert.match(
+		GUARDIAN_POLICY,
+		/Post-denial user approval has highest precedence/,
+	);
+	assert.match(
+		GUARDIAN_POLICY,
+		/Directly reading auth files into shell-visible variables/,
+	);
+});
+
+test("builds transcript delta prompts for a reused reviewer session", () => {
+	const prompt = buildGuardianPrompt({
+		action: {
+			tool: "edit",
+			payload: { path: "/home/user/.ssh/config", edits: [] },
+			cwd: "/repo",
+		},
+		transcript: "[4] user: update that exact SSH host entry",
+		mode: "delta",
+		retryReason: "The prior provider request failed.",
+	});
+	assert.match(prompt, /TRANSCRIPT DELTA START/);
+	assert.match(prompt, /Continue the same review conversation/);
+	assert.match(prompt, /Retry reason:/);
+	assert.match(prompt, /"tool": "edit"/);
 });
 
 test("accepts strict and prose-wrapped JSON", () => {

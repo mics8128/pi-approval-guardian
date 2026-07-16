@@ -3,10 +3,10 @@ import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_REVIEWER_MODEL, REVIEW_TIMEOUT_MS } from "./review.ts";
 
-export const MODEL_ENV = "PI_CODEX_GUARDIAN_MODEL";
-export const POLICY_ENV = "PI_CODEX_GUARDIAN_POLICY";
-export const TIMEOUT_ENV = "PI_CODEX_GUARDIAN_TIMEOUT_MS";
-export const CONFIG_FILE_NAME = "codex-guardian.json";
+export const MODEL_ENV = "PI_APPROVAL_GUARDIAN_MODEL";
+export const POLICY_ENV = "PI_APPROVAL_GUARDIAN_POLICY";
+export const TIMEOUT_ENV = "PI_APPROVAL_GUARDIAN_TIMEOUT_MS";
+export const CONFIG_FILE_NAME = "approval-guardian.json";
 
 interface GuardianConfigFile {
 	model?: unknown;
@@ -31,7 +31,9 @@ export interface LoadGuardianConfigOptions {
 	env?: NodeJS.ProcessEnv;
 }
 
-export function loadGuardianConfig(options: LoadGuardianConfigOptions): GuardianConfig {
+export function loadGuardianConfig(
+	options: LoadGuardianConfigOptions,
+): GuardianConfig {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const env = options.env ?? process.env;
 	const globalPath = join(agentDir, CONFIG_FILE_NAME);
@@ -42,12 +44,20 @@ export function loadGuardianConfig(options: LoadGuardianConfigOptions): Guardian
 		? readConfigFile(projectPath, warnings)
 		: {};
 
-	const model = firstString(env[MODEL_ENV], projectConfig.model, globalConfig.model)
-		?? DEFAULT_REVIEWER_MODEL;
-	const timeoutMs = firstTimeout(env[TIMEOUT_ENV], projectConfig.timeoutMs, globalConfig.timeoutMs)
-		?? REVIEW_TIMEOUT_MS;
+	const model =
+		firstString(env[MODEL_ENV], projectConfig.model, globalConfig.model) ??
+		DEFAULT_REVIEWER_MODEL;
+	const timeoutMs =
+		firstTimeout(
+			env[TIMEOUT_ENV],
+			projectConfig.timeoutMs,
+			globalConfig.timeoutMs,
+		) ?? REVIEW_TIMEOUT_MS;
 	const policies = [globalConfig.policy, projectConfig.policy, env[POLICY_ENV]]
-		.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+		.filter(
+			(value): value is string =>
+				typeof value === "string" && value.trim().length > 0,
+		)
 		.map((value) => value.trim());
 
 	return {
@@ -71,7 +81,9 @@ function readConfigFile(path: string, warnings: string[]): GuardianConfigFile {
 		}
 		return parsed as GuardianConfigFile;
 	} catch (error) {
-		warnings.push(`Ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`);
+		warnings.push(
+			`Ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`,
+		);
 		return {};
 	}
 }
@@ -85,8 +97,14 @@ function firstString(...values: unknown[]): string | undefined {
 
 function firstTimeout(...values: unknown[]): number | undefined {
 	for (const value of values) {
-		const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
-		if (Number.isInteger(parsed) && parsed >= 1_000 && parsed <= 300_000) return parsed;
+		const parsed =
+			typeof value === "number"
+				? value
+				: typeof value === "string"
+					? Number(value)
+					: NaN;
+		if (Number.isInteger(parsed) && parsed >= 1_000 && parsed <= 300_000)
+			return parsed;
 	}
 	return undefined;
 }

@@ -1,0 +1,14 @@
+pi-approval-guardian
+Copyright 2026 pi-approval-guardian contributors
+
+This distribution includes modified and adapted portions of OpenAI Codex Guardian policy and prompt materials from:
+https://github.com/openai/codex/tree/03bb3b12367397e14a8facc2e018d645ff4d8e83/codex-rs/core/src/guardian
+
+OpenAI Codex
+Copyright 2025 OpenAI
+Licensed under the Apache License, Version 2.0.
+A copy of the license is provided at LICENSES/Apache-2.0.txt.
+
+The Guardian policy materials were adapted for Pi's TypeScript extension API, Pi tool names, local configuration model, action envelope, transcript representation, reviewer-session lifecycle, retry behavior, and UI. These files have been modified from the upstream work.
+
+Only attribution notices relevant to the Guardian policy/prompt materials copied into this distribution are included here. No Ratatui-derived code is bundled.
