@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
 	AUTO_REVIEW_DENIAL_WINDOW_SIZE,
@@ -10,6 +11,7 @@ import {
 	MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN,
 	ReviewBatchTracker,
 	MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN,
+	circuitOutcomeForReview,
 	classifyMutationPath,
 	classifyReadPath,
 	requiresExplicitReadAuthorization,
@@ -41,6 +43,46 @@ test("allows reset consecutive denials but retains the recent window", () => {
 	assert.equal(AUTO_REVIEW_DENIAL_WINDOW_SIZE, 50);
 });
 
+test("classifies denied, timeout, and failure as adverse circuit outcomes", () => {
+	const assessment = {
+		risk_level: "low" as const,
+		user_authorization: "unknown" as const,
+		outcome: "allow" as const,
+		rationale: "",
+	};
+	assert.equal(
+		circuitOutcomeForReview({ kind: "allowed", assessment }),
+		false,
+	);
+	assert.equal(
+		circuitOutcomeForReview({ kind: "denied", assessment: { ...assessment, outcome: "deny" } }),
+		true,
+	);
+	assert.equal(
+		circuitOutcomeForReview({ kind: "timeout", message: "timeout" }),
+		true,
+	);
+	assert.equal(
+		circuitOutcomeForReview({ kind: "failure", message: "failure" }),
+		true,
+	);
+	assert.equal(
+		circuitOutcomeForReview({ kind: "cancelled", message: "cancelled" }),
+		false,
+	);
+
+	const breaker = new DenialCircuitBreaker();
+	assert.equal(breaker.record(true), false);
+	assert.equal(breaker.record(true), false);
+	assert.equal(breaker.record(true), true);
+	breaker.reset();
+	assert.equal(breaker.record(true), false);
+	assert.equal(breaker.record(false), false);
+	assert.equal(breaker.record(true), false);
+	assert.equal(breaker.record(true), false);
+	assert.equal(breaker.record(true), true);
+});
+
 test("counts simultaneous reviewed tool calls as one denial batch", () => {
 	const breaker = new DenialCircuitBreaker();
 	const batches = new ReviewBatchTracker();
@@ -55,6 +97,29 @@ test("counts simultaneous reviewed tool calls as one denial batch", () => {
 test("reviews writes and edits outside the project", () => {
 	assert.equal(shouldReviewMutation("../outside.txt", "/repo/project"), true);
 	assert.equal(shouldReviewMutation("src/app.ts", "/repo/project"), false);
+});
+
+test("matches Pi path normalization for tilde, at-prefix, file URLs, and Unicode spaces", () => {
+	const root = mkdtempSync(join(tmpdir(), "guardian-resolve-"));
+	const project = join(root, "project");
+	mkdirSync(project);
+	for (const path of [
+		"~/guardian-path-normalization.txt",
+		"@~/guardian-path-normalization.txt",
+		`@${join(root, "outside.txt")}`,
+		pathToFileURL(join(root, "url target.txt")).href,
+	]) {
+		assert.equal(classifyMutationPath(path, project).outsideProject, true, path);
+	}
+	const unicodePath = join(root, "outside\u00a0target.txt");
+	const unicodeTarget = classifyReadPath(unicodePath, project);
+	assert.equal(unicodeTarget.outsideProject, true);
+	assert.equal(unicodeTarget.absolutePath, join(realpathSync(root), "outside target.txt"));
+	assert.equal(
+		classifyMutationPath(`@${join(project, "src", "app.ts")}`, project)
+			.outsideProject,
+		false,
+	);
 });
 
 test("detects project paths that escape through a symlink", () => {
@@ -123,7 +188,14 @@ test("requires explicit authorization for project-private reads", () => {
 			path,
 		);
 	}
-	for (const path of ["README.md", "src/config.ts", "package.json"]) {
+	for (const path of [
+		"README.md",
+		"src/config.ts",
+		"src/password-reset.ts",
+		"src/service-account.ts",
+		"private/README.md",
+		"package.json",
+	]) {
 		assert.equal(
 			requiresExplicitReadAuthorization(path, "/repo/project"),
 			false,
@@ -247,6 +319,20 @@ test("applies configured path review levels", () => {
 		"C:\\repo\\project",
 	);
 	assert.equal(windowsOutside.outsideProject, true);
+	assert.equal(
+		classifyReadPath(
+			"\\\\server\\share\\project\\README.md",
+			"\\\\server\\share\\project",
+		).outsideProject,
+		false,
+	);
+	assert.equal(
+		classifyReadPath(
+			"\\\\server\\other\\README.md",
+			"\\\\server\\share\\project",
+		).outsideProject,
+		true,
+	);
 	const ordinaryOutside = classifyReadPath("../other/README.md", "/repo/project");
 	const privateInside = classifyReadPath(".env", "/repo/project");
 	assert.equal(shouldReviewPath("always", ordinaryOutside), true);
@@ -254,6 +340,24 @@ test("applies configured path review levels", () => {
 	assert.equal(shouldReviewPath("private-only", ordinaryOutside), false);
 	assert.equal(shouldReviewPath("private-only", privateInside), true);
 	assert.equal(shouldReviewPath("off", privateInside), false);
+});
+
+test("uses credential-aware names without treating adjacent source names as private", () => {
+	for (const path of [
+		"config/service-account",
+		"config/service-account-prod.json",
+		"config/password-vault.yaml",
+		"config/password.json",
+	]) {
+		assert.equal(classifyReadPath(path, "/repo/project").private, true, path);
+	}
+	for (const path of [
+		"src/service-account.ts",
+		"src/password-reset.ts",
+		"private/README.md",
+	]) {
+		assert.equal(classifyReadPath(path, "/repo/project").private, false, path);
+	}
 });
 
 test("reviews sensitive paths inside the project", () => {

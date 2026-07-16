@@ -311,17 +311,32 @@ export class ReviewerSessionController {
 			appendSystemPromptOverride: () => [],
 		});
 		await resourceLoader.reload();
-		const created = await createAgentSession({
+		const registryCompatibility = this.options.modelRegistry as unknown as {
+			authStorage?: unknown;
+			runtime?: unknown;
+		};
+		const sessionOptions: Record<string, unknown> = {
 			cwd: this.options.cwd,
-			authStorage: this.options.modelRegistry.authStorage,
-			modelRegistry: this.options.modelRegistry,
 			model: this.options.model,
 			thinkingLevel: "low",
 			tools: this.options.tools ?? ["read", "grep", "find", "ls"],
 			resourceLoader,
 			sessionManager: SessionManager.inMemory(this.options.cwd),
 			settingsManager,
-		});
+		};
+		if (registryCompatibility.runtime) {
+			// Pi >= 0.80.9 exposes ModelRuntime through the extension compatibility facade.
+			sessionOptions.modelRuntime = registryCompatibility.runtime;
+		} else {
+			// Pi 0.80.7/0.80.8 accept the legacy ModelRegistry/AuthStorage pair.
+			sessionOptions.modelRegistry = this.options.modelRegistry;
+			if (registryCompatibility.authStorage) {
+				sessionOptions.authStorage = registryCompatibility.authStorage;
+			}
+		}
+		const created = await createAgentSession(
+			sessionOptions as Parameters<typeof createAgentSession>[0],
+		);
 		if (this.disposed) {
 			created.session.dispose();
 			throw new Error("reviewer controller was disposed during startup");

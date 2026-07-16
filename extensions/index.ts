@@ -8,11 +8,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	loadGuardianConfig,
+	type GuardianConfig,
 	type ReviewLevel,
 } from "../src/config.ts";
 import {
 	DenialCircuitBreaker,
 	ReviewBatchTracker,
+	circuitOutcomeForReview,
 	classifyMutationPath,
 	classifyReadPath,
 	directoryMayContainPrivatePath,
@@ -29,34 +31,418 @@ import {
 import {
 	ReviewerSessionController,
 	resolveReviewerModel,
+	type ReviewerModel,
 } from "../src/reviewer-session.ts";
+
+type ReviewerChannelRole =
+	| "primary"
+	| "configured-fallback"
+	| "current-model";
+
+export interface ReviewerChannel {
+	role: ReviewerChannelRole;
+	modelSpec: string;
+	model?: ReviewerModel;
+}
+
+interface GuardianHealth {
+	ready: boolean;
+	reason?: string;
+	selectedFallback?: Exclude<ReviewerChannelRole, "primary">;
+	fallbackUnavailable?: boolean;
+}
+
+function reviewerModelForSpec(
+	modelSpec: string,
+	registry: ExtensionContext["modelRegistry"],
+): ReviewerModel | undefined {
+	const parsed = parseModelSpec(modelSpec);
+	return parsed
+		? resolveReviewerModel(registry, parsed.provider, parsed.model)
+		: undefined;
+}
+
+function modelSpecFor(model: { provider: string; id: string }): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function reviewerChannelForSpec(
+	role: ReviewerChannelRole,
+	modelSpec: string,
+	registry: ExtensionContext["modelRegistry"],
+	currentModel?: ExtensionContext["model"],
+): ReviewerChannel {
+	const model =
+		currentModel && modelSpecFor(currentModel) === modelSpec
+			? (currentModel as ReviewerModel)
+			: reviewerModelForSpec(modelSpec, registry);
+	return { role, modelSpec, model };
+}
+
+function currentReviewerChannel(
+	currentModel: ExtensionContext["model"],
+): ReviewerChannel | undefined {
+	return currentModel
+		? {
+				role: "current-model",
+				modelSpec: modelSpecFor(currentModel),
+				model: currentModel as ReviewerModel,
+			}
+		: undefined;
+}
+
+function reviewerChannelIdentity(channel: ReviewerChannel): string {
+	return channel.model ? modelSpecFor(channel.model) : channel.modelSpec;
+}
+
+function buildReviewerChannels(
+	config: GuardianConfig,
+	registry: ExtensionContext["modelRegistry"],
+	currentModel?: ExtensionContext["model"],
+): ReviewerChannel[] {
+	const candidates = [
+		reviewerChannelForSpec("primary", config.model, registry, currentModel),
+		reviewerChannelForSpec(
+			"configured-fallback",
+			config.fallbackModel,
+			registry,
+			currentModel,
+		),
+		currentReviewerChannel(currentModel),
+	].filter((channel): channel is ReviewerChannel => channel !== undefined);
+	const seen = new Set<string>();
+	return candidates.filter((channel) => {
+		const identity = reviewerChannelIdentity(channel);
+		if (seen.has(identity)) return false;
+		seen.add(identity);
+		return true;
+	});
+}
+
+function reviewerChannelLabel(role: ReviewerChannelRole): string {
+	switch (role) {
+		case "primary":
+			return "Primary";
+		case "configured-fallback":
+			return "Configured fallback";
+		case "current-model":
+			return "Current session model";
+	}
+}
+
+function reviewerChannelIssue(
+	channel: ReviewerChannel,
+	registry: ExtensionContext["modelRegistry"],
+): string | undefined {
+	return !channel.model
+		? `Reviewer model not found: ${channel.modelSpec}.`
+		: !registry.hasConfiguredAuth(channel.model)
+			? `Reviewer authentication is unavailable for ${channel.model.provider}.`
+			: undefined;
+}
+
+export function guardianHealth(
+	config: GuardianConfig,
+	registry: ExtensionContext["modelRegistry"],
+	currentModel?: ExtensionContext["model"],
+): GuardianHealth {
+	if (config.warnings.length > 0) {
+		return {
+			ready: false,
+			reason: `Guardian configuration is invalid: ${config.warnings.join(" ")}`,
+		};
+	}
+	const channels = buildReviewerChannels(config, registry, currentModel);
+	const issues = channels.map((channel) => reviewerChannelIssue(channel, registry));
+	const primaryIssue = issues[0];
+	const backups = channels.slice(1);
+	const backupIssues = issues.slice(1);
+	if (!primaryIssue) {
+		return backups.length > 0 && backupIssues.every(Boolean)
+			? {
+					ready: true,
+					reason: backupIssues
+						.map(
+							(issue, index) =>
+								`${reviewerChannelLabel(backups[index].role)} unavailable: ${issue}`,
+						)
+						.join(" "),
+					fallbackUnavailable: true,
+				}
+			: { ready: true };
+	}
+	const readyFallbackIndex = backupIssues.findIndex((issue) => !issue);
+	if (readyFallbackIndex >= 0) {
+		const selected = backups[readyFallbackIndex];
+		return {
+			ready: true,
+			reason: channels
+				.slice(0, readyFallbackIndex + 1)
+				.map(
+					(channel, index) =>
+						`${reviewerChannelLabel(channel.role)} unavailable: ${issues[index]}`,
+				)
+				.join(" "),
+			selectedFallback: selected.role as Exclude<
+				ReviewerChannelRole,
+				"primary"
+			>,
+		};
+	}
+	return {
+		ready: false,
+		reason: channels
+			.map(
+				(channel, index) =>
+					`${reviewerChannelLabel(channel.role)} unavailable: ${issues[index]}`,
+			)
+			.join(" "),
+	};
+}
+
+export function shouldFallbackReview(result: GuardianReviewResult): boolean {
+	return result.kind === "failure";
+}
+
+export async function runReviewWithFallbackChain(
+	channels: ReviewerChannel[],
+	review: (channel: ReviewerChannel) => Promise<GuardianReviewResult>,
+	onFallback: (from: ReviewerChannel, to: ReviewerChannel) => void,
+): Promise<{
+	result: GuardianReviewResult;
+	finalChannel: ReviewerChannel;
+	attempts: Array<{ channel: ReviewerChannel; result: GuardianReviewResult }>;
+}> {
+	const seen = new Set<string>();
+	const distinctChannels = channels.filter((channel) => {
+		const identity = reviewerChannelIdentity(channel);
+		if (seen.has(identity)) return false;
+		seen.add(identity);
+		return true;
+	});
+	if (distinctChannels.length === 0)
+		throw new Error("No reviewer channels are configured.");
+	const attempts: Array<{
+		channel: ReviewerChannel;
+		result: GuardianReviewResult;
+	}> = [];
+	for (let index = 0; index < distinctChannels.length; index++) {
+		const channel = distinctChannels[index];
+		if (index > 0)
+			onFallback(distinctChannels[index - 1], channel);
+		const result = await review(channel);
+		attempts.push({ channel, result });
+		if (
+			!shouldFallbackReview(result) ||
+			index === distinctChannels.length - 1
+		) {
+			return { result, finalChannel: channel, attempts };
+		}
+	}
+	throw new Error("Guardian reviewer chain ended unexpectedly.");
+}
+
+export function lockReviewedToolInput(event: ToolCallEvent): void {
+	const input = event.input;
+	deepFreezeJsonLike(input);
+	const descriptor = Object.getOwnPropertyDescriptor(event, "input");
+	Object.defineProperty(event, "input", {
+		value: input,
+		enumerable: descriptor?.enumerable ?? true,
+		writable: false,
+		configurable: false,
+	});
+}
+
+export function lockAllowedToolInput(
+	event: ToolCallEvent,
+	result: GuardianReviewResult,
+): GuardianReviewResult {
+	if (result.kind !== "allowed") return result;
+	try {
+		lockReviewedToolInput(event);
+		return result;
+	} catch (error) {
+		return {
+			kind: "failure",
+			message: `Approved tool input could not be locked safely: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+}
+
+function deepFreezeJsonLike(value: unknown): void {
+	assertJsonLike(value);
+	freezeJsonLike(value);
+}
+
+function assertJsonLike(
+	value: unknown,
+	visited = new WeakSet<object>(),
+	active = new WeakSet<object>(),
+): void {
+	if (
+		value === null ||
+		typeof value === "string" ||
+		typeof value === "boolean"
+	) {
+		return;
+	}
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error("non-finite number");
+		return;
+	}
+	if (typeof value !== "object") {
+		throw new Error(`non-JSON ${typeof value} value`);
+	}
+	if (active.has(value)) throw new Error("cyclic object graph");
+	if (visited.has(value)) return;
+	active.add(value);
+	const prototype = Object.getPrototypeOf(value);
+	if (Array.isArray(value)) {
+		if (prototype !== Array.prototype) {
+			throw new Error("array with custom prototype");
+		}
+		let indexCount = 0;
+		for (const key of Reflect.ownKeys(value)) {
+			if (key === "length") continue;
+			if (typeof key === "symbol") throw new Error("symbol-keyed property");
+			const index = Number(key);
+			if (
+				!Number.isInteger(index) ||
+				index < 0 ||
+				String(index) !== key ||
+				index >= value.length
+			) {
+				throw new Error(`non-JSON array property ${key}`);
+			}
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+				throw new Error(`non-JSON array index ${key}`);
+			}
+			indexCount++;
+			assertJsonLike(descriptor.value, visited, active);
+		}
+		if (indexCount !== value.length) throw new Error("sparse array");
+	} else {
+		if (prototype !== Object.prototype && prototype !== null) {
+			throw new Error(
+				`non-plain object ${prototype?.constructor?.name ?? "unknown"}`,
+			);
+		}
+		for (const key of Reflect.ownKeys(value)) {
+			if (typeof key === "symbol") throw new Error("symbol-keyed property");
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+				throw new Error(`non-JSON property ${key}`);
+			}
+			assertJsonLike(descriptor.value, visited, active);
+		}
+	}
+	active.delete(value);
+	visited.add(value);
+}
+
+function freezeJsonLike(value: unknown, seen = new WeakSet<object>()): void {
+	if (typeof value !== "object" || value === null || seen.has(value)) return;
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (descriptor && "value" in descriptor) freezeJsonLike(descriptor.value, seen);
+	}
+	Object.freeze(value);
+}
 
 // Extension wiring intentionally coordinates lifecycle, UI, policy, and reviewer state.
 // pi-lens-ignore: high-complexity, high-fan-out
 export default function approvalGuardian(pi: ExtensionAPI) {
 	let activeReviews = 0;
-	let controller: ReviewerSessionController | undefined;
-	let controllerKey: string | undefined;
+	let idleStatus: string | undefined;
+	const reviewerSwitchNoticeKeys = new Set<string>();
+	const controllers = new Map<string, ReviewerSessionController>();
+	let controllerContextKey: string | undefined;
 	const circuitBreaker = new DenialCircuitBreaker();
 	const reviewBatches = new ReviewBatchTracker();
 
 	const resetRuntime = () => {
-		controller?.dispose();
-		controller = undefined;
-		controllerKey = undefined;
+		for (const controller of controllers.values()) controller.dispose();
+		controllers.clear();
+		controllerContextKey = undefined;
+		reviewerSwitchNoticeKeys.clear();
 		circuitBreaker.reset();
 		reviewBatches.reset();
 	};
 
-	const finishReviewBatch = (batchId: string, ctx: ExtensionContext) => {
-		const denied = reviewBatches.finish(batchId);
-		if (denied !== undefined && circuitBreaker.record(denied)) ctx.abort();
+	const setIdleStatus = (ctx: ExtensionContext, status: string) => {
+		idleStatus = status;
+		if (activeReviews === 0) {
+			ctx.ui.setStatus("approval-guardian", status);
+		}
 	};
 
-	pi.on("session_start", () => resetRuntime());
+	const notifyReviewerSwitch = (
+		ctx: ExtensionContext,
+		from: ReviewerChannel,
+		to: ReviewerChannel,
+	) => {
+		idleStatus =
+			to.role === "current-model"
+				? "Guardian · current-model fallback"
+				: "Guardian · fallback";
+		if (activeReviews === 0) {
+			ctx.ui.setStatus("approval-guardian", idleStatus);
+		}
+		const key = `${from.role}:${from.modelSpec}→${to.role}:${to.modelSpec}`;
+		if (reviewerSwitchNoticeKeys.has(key)) return;
+		reviewerSwitchNoticeKeys.add(key);
+		ctx.ui.notify(
+			to.role === "current-model"
+				? `Guardian · configured reviewer channels unavailable; using current session model ${to.modelSpec}.`
+				: `Guardian · primary reviewer unavailable; using configured fallback ${to.modelSpec}.`,
+			"warning",
+		);
+	};
+
+	const finishReviewBatch = (batchId: string, ctx: ExtensionContext) => {
+		const adverse = reviewBatches.finish(batchId);
+		if (adverse !== undefined && circuitBreaker.record(adverse)) ctx.abort();
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		resetRuntime();
+		activeReviews = 0;
+		const config = loadGuardianConfig({
+			cwd: ctx.cwd,
+			projectTrusted: ctx.isProjectTrusted(),
+		});
+		const channels = buildReviewerChannels(
+			config,
+			ctx.modelRegistry,
+			ctx.model,
+		);
+		const health = guardianHealth(config, ctx.modelRegistry, ctx.model);
+		if (health.selectedFallback) {
+			const selected = channels.find(
+				(channel) => channel.role === health.selectedFallback,
+			);
+			if (selected) notifyReviewerSwitch(ctx, channels[0], selected);
+		} else {
+			setIdleStatus(
+				ctx,
+				!health.ready
+					? "Guardian · needs attention"
+					: health.fallbackUnavailable
+						? "Guardian · ready · fallback unavailable"
+						: "Guardian · ready",
+			);
+		}
+		if (!health.selectedFallback && health.reason) {
+			ctx.ui.notify(health.reason, "warning");
+		}
+	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		resetRuntime();
 		activeReviews = 0;
+		idleStatus = undefined;
 		ctx.ui.setStatus("approval-guardian", undefined);
 	});
 	pi.on("before_agent_start", () => {
@@ -64,19 +450,124 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		reviewBatches.reset();
 	});
 
-	const showConfiguration = (
+	const showConfiguration = async (
 		args: string,
 		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
 	): Promise<void> => {
-		const config = loadGuardianConfig({
-			cwd: ctx.cwd,
-			projectTrusted: ctx.isProjectTrusted(),
-		});
-		const parsed = parseModelSpec(config.model);
-		const model = parsed
-			? resolveReviewerModel(ctx.modelRegistry, parsed.provider, parsed.model)
+		const projectTrusted = ctx.isProjectTrusted();
+		const config = loadGuardianConfig({ cwd: ctx.cwd, projectTrusted });
+		const primaryChannel = reviewerChannelForSpec(
+			"primary",
+			config.model,
+			ctx.modelRegistry,
+			ctx.model,
+		);
+		const configuredFallbackChannel = reviewerChannelForSpec(
+			"configured-fallback",
+			config.fallbackModel,
+			ctx.modelRegistry,
+			ctx.model,
+		);
+		const currentChannel = currentReviewerChannel(ctx.model);
+		const channels = buildReviewerChannels(
+			config,
+			ctx.modelRegistry,
+			ctx.model,
+		);
+		const checkChannel = async (
+			channel: ReviewerChannel,
+		): Promise<string | undefined> => {
+			if (!channel.model)
+				return `Reviewer model not found: ${channel.modelSpec}.`;
+			try {
+				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(channel.model);
+				return !auth.ok || !auth.apiKey
+					? `Reviewer authentication is unavailable for ${channel.model.provider}.`
+					: undefined;
+			} catch (error) {
+				return `Reviewer authentication check failed: ${error instanceof Error ? error.message : String(error)}`;
+			}
+		};
+		const issues = new Map<string, string | undefined>();
+		let issue: string | undefined;
+		let selectedIndex = -1;
+		if (config.warnings.length > 0) {
+			issue = `Guardian configuration is invalid: ${config.warnings.join(" ")}`;
+		} else {
+			for (const channel of channels) {
+				issues.set(reviewerChannelIdentity(channel), await checkChannel(channel));
+			}
+			selectedIndex = channels.findIndex(
+				(channel) => !issues.get(reviewerChannelIdentity(channel)),
+			);
+			if (selectedIndex < 0) {
+				issue = channels
+					.map(
+						(channel) =>
+							`${reviewerChannelLabel(channel.role)} unavailable: ${issues.get(reviewerChannelIdentity(channel))}`,
+					)
+					.join(" ");
+			}
+		}
+		const ready = selectedIndex >= 0 && issue === undefined;
+		const selectedChannel = ready ? channels[selectedIndex] : undefined;
+		const degradedFallback =
+			ready &&
+			selectedIndex === 0 &&
+			channels.length > 1 &&
+			channels
+				.slice(1)
+				.every((channel) => issues.get(reviewerChannelIdentity(channel)));
+		const statusLabel = !ready
+			? "needs attention"
+			: selectedChannel?.role === "current-model"
+				? "ready via current model"
+				: selectedChannel?.role === "configured-fallback"
+					? "ready via configured fallback"
+					: degradedFallback
+						? "ready · fallback unavailable"
+						: "ready";
+		const channelStatus = (channelIssue: string | undefined) =>
+			config.warnings.length > 0
+				? "not checked"
+				: channelIssue
+					? "unavailable"
+					: "ready";
+		const primaryIdentity = reviewerChannelIdentity(primaryChannel);
+		const configuredIdentity = reviewerChannelIdentity(
+			configuredFallbackChannel,
+		);
+		const currentIdentity = currentChannel
+			? reviewerChannelIdentity(currentChannel)
 			: undefined;
-		const ready = Boolean(model) && config.warnings.length === 0;
+		const configuredFallbackStatus =
+			configuredIdentity === primaryIdentity
+				? "same as primary (no separate channel)"
+				: channelStatus(issues.get(configuredIdentity));
+		const currentFallbackStatus = !currentChannel
+			? "unavailable (no current session model)"
+			: currentIdentity === primaryIdentity
+				? "same as primary (no separate channel)"
+				: currentIdentity === configuredIdentity
+					? "same as configured fallback (no separate channel)"
+					: channelStatus(issues.get(currentIdentity as string));
+		const projectConfigStatus = !config.projectConfigPresent
+			? "absent"
+			: projectTrusted
+				? "present · trusted"
+				: "present · skipped (project untrusted)";
+		if (selectedChannel && selectedIndex > 0) {
+			notifyReviewerSwitch(ctx, channels[selectedIndex - 1], selectedChannel);
+		} else {
+			setIdleStatus(
+				ctx,
+				!ready
+					? "Guardian · needs attention"
+					: degradedFallback
+						? "Guardian · ready · fallback unavailable"
+						: "Guardian · ready",
+			);
+		}
 		const details =
 			args.trim() === "rules"
 				? [
@@ -84,23 +575,43 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 						...Object.entries(config.review)
 							.sort(([left], [right]) => left.localeCompare(right))
 							.map(([key, level]) => `${key} → ${level}`),
-						"Unconfigured tools with a string path parameter default to private-only.",
-						"All review prompts go to the isolated AI reviewer; no user confirmation dialog is used.",
+						"Unconfigured tools with a top-level string path parameter default to private-only.",
+						"All review prompts go to isolated AI reviewer sessions; no user confirmation dialog is used.",
 					]
 				: [
 						"Reviews configured shell, private-read/search, and sensitive/out-of-project mutation actions before execution.",
 						"Run /approval-guardian rules for the tool/parameter review matrix.",
 					];
+		const unavailableBeforeSelected =
+			selectedIndex > 0
+				? channels.slice(0, selectedIndex).map(
+						(channel) =>
+							`${reviewerChannelLabel(channel.role)} unavailable: ${issues.get(reviewerChannelIdentity(channel))}`,
+					)
+				: [];
+		const unavailableBackups = degradedFallback
+			? channels.slice(1).map(
+					(channel) =>
+						`${reviewerChannelLabel(channel.role)} unavailable: ${issues.get(reviewerChannelIdentity(channel))}`,
+				)
+			: [];
 		ctx.ui.notify(
 			[
-				`Approval Guardian · ${ready ? "ready" : "needs attention"} · fail-closed`,
-				`${config.model} · ${formatDuration(config.timeoutMs)} deadline · up to 3 attempts · policy ${config.policy ? "customized" : "default"}`,
+				`Approval Guardian · ${statusLabel} · fail-closed`,
+				`Primary: ${config.model} (${config.modelSource}) · ${channelStatus(issues.get(primaryIdentity))}`,
+				`Configured fallback: ${config.fallbackModel} (${config.fallbackModelSource}) · ${configuredFallbackStatus}`,
+				`Current-model fallback: ${currentChannel?.modelSpec ?? "unavailable"} · ${currentFallbackStatus}`,
+				`${formatDuration(config.timeoutMs)} deadline (${config.timeoutSource}) · up to 3 attempts per distinct reviewer channel`,
+				`Policy: ${config.policy ? `customized (${config.policySources.join(" + ")})` : "default"}`,
+				`Global config: ${config.globalConfigPresent ? "present" : "absent"} · ${config.globalPath}`,
+				`Project config: ${projectConfigStatus} · ${config.projectPath}`,
 				...details,
-				...config.warnings,
+				...unavailableBeforeSelected,
+				...unavailableBackups,
+				...(issue ? [issue] : []),
 			].join("\n"),
-			ready ? "info" : "warning",
+			ready && !degradedFallback ? "info" : "warning",
 		);
-		return Promise.resolve();
 	};
 
 	pi.registerCommand("approval-guardian", {
@@ -143,15 +654,21 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			if (circuitBreaker.isOpen()) {
 				const result: GuardianReviewResult = {
 					kind: "circuit-open",
-					message: "Repeated Guardian denials reached the per-turn limit.",
+					message: "Repeated adverse Guardian outcomes reached the per-turn limit.",
 				};
 				ctx.ui.notify(formatReviewResult(result, action), "error");
 				return { block: true, reason: rejectionReason(result) };
 			}
 
-			const reviewed = await reviewAction(action, ctx);
-			const result = enforceActionRequirements(action, reviewed);
-			reviewBatches.record(batch.id, result.kind === "denied");
+			const reviewed = await reviewAction(action, config, ctx);
+			const result = lockAllowedToolInput(
+				event,
+				enforceActionRequirements(action, reviewed),
+			);
+			const circuitOutcome = circuitOutcomeForReview(result);
+			if (circuitOutcome !== undefined) {
+				reviewBatches.record(batch.id, circuitOutcome);
+			}
 			if (result.kind === "allowed") {
 				ctx.ui.notify(formatReviewResult(result, action), "info");
 				return;
@@ -181,31 +698,84 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 
 	async function reviewAction(
 		action: GuardianAction,
+		config: GuardianConfig,
 		ctx: ExtensionContext,
 	): Promise<GuardianReviewResult> {
 		activeReviews++;
 		ctx.ui.setStatus("approval-guardian", reviewStatus(activeReviews));
 		try {
-			const config = loadGuardianConfig({
-				cwd: ctx.cwd,
-				projectTrusted: ctx.isProjectTrusted(),
-			});
-			const spec = parseModelSpec(config.model);
-			if (!spec) {
+			const channels = buildReviewerChannels(
+				config,
+				ctx.modelRegistry,
+				ctx.model,
+			);
+			const { result, attempts } = await runReviewWithFallbackChain(
+				channels,
+				(channel) => reviewWithChannel(channel, config, action, ctx),
+				(from, to) => notifyReviewerSwitch(ctx, from, to),
+			);
+			const usedFallback = attempts.length > 1;
+			if (usedFallback && shouldFallbackReview(result)) {
+				ctx.ui.notify(
+					[
+						"Guardian · all attempted reviewer channels failed.",
+						...attempts.map(
+							({ channel, result: attemptResult }) =>
+								`${reviewerChannelLabel(channel.role)} (${channel.modelSpec}): ${reviewResultDiagnostic(attemptResult)}`,
+						),
+					].join("\n"),
+					"error",
+				);
+			}
+			if (result.kind === "failure" || result.kind === "timeout") {
+				idleStatus = "Guardian · needs attention";
+			} else if (!usedFallback && result.kind !== "cancelled") {
+				const health = guardianHealth(config, ctx.modelRegistry, ctx.model);
+				idleStatus = health.fallbackUnavailable
+					? "Guardian · ready · fallback unavailable"
+					: "Guardian · ready";
+				reviewerSwitchNoticeKeys.clear();
+			}
+			if (usedFallback && result.kind === "failure") {
 				return {
 					kind: "failure",
-					message: `Invalid reviewer model ${config.model}; expected provider/model.`,
+					message: "Automatic approval review failed.",
 				};
 			}
-			const model = resolveReviewerModel(
-				ctx.modelRegistry,
-				spec.provider,
-				spec.model,
+			if (usedFallback && result.kind === "timeout") {
+				return {
+					kind: "timeout",
+					message: "Automatic approval review timed out.",
+				};
+			}
+			return result;
+		} catch (error) {
+			idleStatus = "Guardian · needs attention";
+			return {
+				kind: "failure",
+				message: `Automatic approval review failed: ${error instanceof Error ? error.message : String(error)}`,
+			};
+		} finally {
+			activeReviews--;
+			ctx.ui.setStatus(
+				"approval-guardian",
+				activeReviews > 0 ? reviewStatus(activeReviews) : idleStatus,
 			);
+		}
+	}
+
+	async function reviewWithChannel(
+		channel: ReviewerChannel,
+		config: GuardianConfig,
+		action: GuardianAction,
+		ctx: ExtensionContext,
+	): Promise<GuardianReviewResult> {
+		try {
+			const model = channel.model;
 			if (!model) {
 				return {
 					kind: "failure",
-					message: `Reviewer model not found: ${spec.provider}/${spec.model}.`,
+					message: `Reviewer model not found: ${channel.modelSpec}.`,
 				};
 			}
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
@@ -222,15 +792,27 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				? `${baseSystemPrompt}\n\n# Private Data Review Restriction\nNo investigation tools are available for this review. Decide authorization only from the user transcript and planned-action metadata; deny if explicit authorization is not established.`
 				: baseSystemPrompt;
 			const reviewerTools = reviewerToolsForAction(action);
-			const key = JSON.stringify({
+			const nextContextKey = JSON.stringify({
 				cwd: ctx.cwd,
-				model: `${model.provider}/${model.id}`,
+				primaryModel: config.model,
+				fallbackModel: config.fallbackModel,
+				currentModel: ctx.model ? modelSpecFor(ctx.model) : undefined,
 				timeoutMs: config.timeoutMs,
-				systemPrompt,
+				baseSystemPrompt,
+			});
+			if (controllerContextKey !== nextContextKey) {
+				for (const existing of controllers.values()) existing.dispose();
+				controllers.clear();
+				controllerContextKey = nextContextKey;
+			}
+			const key = JSON.stringify({
+				channel: channel.role,
+				modelSpec: channel.modelSpec,
+				model: `${model.provider}/${model.id}`,
 				privateDataReview,
 			});
-			if (!controller || controllerKey !== key) {
-				controller?.dispose();
+			let controller = controllers.get(key);
+			if (!controller) {
 				controller = new ReviewerSessionController({
 					model,
 					modelRegistry: ctx.modelRegistry,
@@ -239,7 +821,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 					timeoutMs: config.timeoutMs,
 					tools: reviewerTools,
 				});
-				controllerKey = key;
+				controllers.set(key, controller);
 			}
 			return controller.review(action, collectBranchMessages(ctx), ctx.signal);
 		} catch (error) {
@@ -247,12 +829,6 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				kind: "failure",
 				message: `Automatic approval review failed: ${error instanceof Error ? error.message : String(error)}`,
 			};
-		} finally {
-			activeReviews--;
-			ctx.ui.setStatus(
-				"approval-guardian",
-				activeReviews > 0 ? reviewStatus(activeReviews) : undefined,
-			);
 		}
 	}
 }
@@ -429,6 +1005,97 @@ const PRIVATE_COMMAND_DIRECTORIES = [
 	"keyrings",
 ];
 
+const PRIVATE_COMMAND_GLOB_FILES = [
+	".env",
+	".env.local",
+	".npmrc",
+	".pypirc",
+	".netrc",
+	".git-credentials",
+	"auth.json",
+	"token.json",
+	"tokens.json",
+	"credentials.json",
+	"secrets.json",
+	"id_rsa",
+	"id_ed25519",
+	"id_ecdsa",
+	"id_dsa",
+	"secret.pem",
+	"secret.key",
+	"secret.p12",
+	"secret.pfx",
+	"secret.jks",
+	"secret.keystore",
+	"secret.kdbx",
+	"terraform.tfvars",
+];
+
+function globExpressionReferencesPrivateData(expression: string): boolean {
+	if (!/[*?\[\]{}]/.test(expression)) return false;
+	return expression
+		.split(/[\s'"`;|&<>()]+/)
+		.map((token) => token.slice(token.lastIndexOf("=") + 1))
+		.some((token) => {
+			const segments = token
+				.replace(/\\/g, "/")
+				.toLowerCase()
+				.split("/")
+				.filter(Boolean);
+			return segments.some((pattern) =>
+				[...PRIVATE_COMMAND_DIRECTORIES, ...PRIVATE_COMMAND_GLOB_FILES].some(
+					(candidate) => shellGlobMatches(pattern, candidate),
+				),
+			);
+		});
+}
+
+function shellGlobMatches(pattern: string, candidate: string): boolean {
+	return expandBracePatterns(pattern).some((expanded) => {
+		const literal = expanded.replace(/\[[^\]]*\]/g, "").replace(/[*?]/g, "");
+		if (literal.length === 0) return false;
+		let source = "^";
+		for (let index = 0; index < expanded.length; index++) {
+			const character = expanded[index];
+			if (character === "*") {
+				source += ".*";
+			} else if (character === "?") {
+				source += ".";
+			} else if (character === "[") {
+				const close = expanded.indexOf("]", index + 1);
+				if (close < 0) {
+					source += "\\[";
+					continue;
+				}
+				let content = expanded.slice(index + 1, close);
+				if (content.startsWith("!")) content = `^${content.slice(1)}`;
+				source += `[${content}]`;
+				index = close;
+			} else {
+				source += escapeRegExp(character);
+			}
+		}
+		try {
+			return new RegExp(`${source}$`, "i").test(candidate);
+		} catch {
+			return false;
+		}
+	});
+}
+
+function expandBracePatterns(pattern: string, depth = 0): string[] {
+	if (depth >= 2) return [pattern];
+	const match = /\{([^{}]+)\}/.exec(pattern);
+	if (!match || match.index === undefined) return [pattern];
+	const options = match[1].split(",");
+	if (options.length === 0 || options.length > 16) return [pattern];
+	const prefix = pattern.slice(0, match.index);
+	const suffix = pattern.slice(match.index + match[0].length);
+	return options.flatMap((option) =>
+		expandBracePatterns(`${prefix}${option}${suffix}`, depth + 1),
+	);
+}
+
 function commandReferencesPrivateData(command: string, cwd: string): boolean {
 	const expanded = command
 		.replace(/\$\{HOME\}|\$HOME/gi, homedir())
@@ -444,6 +1111,7 @@ function commandReferencesPrivateData(command: string, cwd: string): boolean {
 	) {
 		return true;
 	}
+	if (globExpressionReferencesPrivateData(expanded)) return true;
 	if (referencesDynamicPiPath(expanded)) return true;
 	if (commandPiPaths(expanded).some((path) => classifyReadPath(path, cwd).private)) {
 		return true;
@@ -497,8 +1165,10 @@ function escapeRegExp(value: string): string {
 }
 
 function looksLikePrivateGlob(glob: string): boolean {
-	return /(?:^|[\\/])(?:\.env(?:[.*]|$)|secrets?(?:[\\/.*]|$)|credentials?(?:[\\/.*]|$)|\.ssh(?:[\\/]|$)|\.gnupg(?:[\\/]|$)|\.aws(?:[\\/]|$)|\.kube(?:[\\/]|$)|[^/\\]*\.(?:pem|key|p12|pfx|tfvars)(?:$|[},]))/i.test(
-		glob,
+	return (
+		/(?:^|[\\/])(?:\.env(?:[.*]|$)|secrets?(?:[\\/.*]|$)|credentials?(?:[\\/.*]|$)|\.ssh(?:[\\/]|$)|\.gnupg(?:[\\/]|$)|\.aws(?:[\\/]|$)|\.kube(?:[\\/]|$)|[^/\\]*\.(?:pem|key|p12|pfx|tfvars)(?:$|[},]))/i.test(
+			glob,
+		) || globExpressionReferencesPrivateData(glob)
 	);
 }
 
@@ -571,7 +1241,7 @@ function rejectionReason(
 		case "cancelled":
 			return "Automatic permission review was cancelled, so approval was not granted.";
 		case "circuit-open":
-			return "Repeated automatic-review denials reached the per-turn safety limit. Stop trying alternate commands and ask the user for guidance.";
+			return "Repeated adverse automatic-review outcomes reached the per-turn safety limit. Stop trying alternate commands and ask the user for guidance.";
 		default:
 			return "Automatic permission review failed closed with an unknown result.";
 	}
@@ -616,6 +1286,13 @@ function actionPreview(action: GuardianAction): string {
 		return `$ ${truncate(singleLine(String(action.payload.command ?? "")), 120)}`;
 	}
 	return `${action.tool} ${truncate(String(action.payload.path ?? ""), 120)}`;
+}
+
+function reviewResultDiagnostic(result: GuardianReviewResult): string {
+	if (result.kind === "failure" || result.kind === "timeout") {
+		return singleLine(result.message);
+	}
+	return result.kind;
 }
 
 function reviewStatus(activeReviews: number): string {

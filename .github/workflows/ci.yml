@@ -25,8 +25,41 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
-      - name: Install dependencies
+      - name: Install locked dependencies
         run: npm ci
+
+      - name: Update Pi peers to the latest compatible versions
+        run: npm update --no-save --package-lock=false @earendil-works/pi-ai @earendil-works/pi-coding-agent
+
+      - name: Show resolved Pi peer versions
+        run: npm ls @earendil-works/pi-ai @earendil-works/pi-coding-agent
+
+      - name: Run checks
+        run: npm run check
+
+      - name: Verify package contents
+        run: npm pack --dry-run
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Update Pi peers to the latest compatible versions
+        run: npm update --no-save --package-lock=false @earendil-works/pi-ai @earendil-works/pi-coding-agent
+
+      - name: Show resolved Pi peer versions
+        run: npm ls @earendil-works/pi-ai @earendil-works/pi-coding-agent
 
       - name: Run checks
         run: npm run check

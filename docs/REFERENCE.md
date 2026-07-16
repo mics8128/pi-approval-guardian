@@ -7,14 +7,14 @@ This document defines the runtime behavior and configuration contract for `pi-ap
 | Rule | Default | Behavior |
 | --- | --- | --- |
 | `bash.command` | `always` | Reviews every Pi agent-issued shell command. |
-| `grep.path` | `always` | Reviews path, pattern, glob, and effective search scope. Empty paths fall back to the current working directory. |
+| `grep.path` | `outside-or-private` | Reviews outside-project searches plus selectors/scopes that may expose private data. Ordinary clean in-project source searches bypass reviewer latency. Empty paths fall back to the current working directory. |
 | `read.path` | `private-only` | Reviews canonical targets classified as private. |
 | `find.path` | `private-only` | Reviews known private targets. |
 | `ls.path` | `private-only` | Reviews known private targets. |
 | `write.path` | `outside-or-private` | Reviews targets outside the project and private/sensitive mutations. |
 | `edit.path` | `outside-or-private` | Uses the same boundary and sensitivity rules as `write`. |
 
-An unconfigured tool with a string `path` parameter defaults to `private-only`. Tools without a recognized path remain outside the gate unless explicitly handled by another rule.
+An unconfigured tool with a top-level string `path` parameter defaults to `private-only`. Tools without that recognized top-level path, including nested-path and pathless custom tools, remain outside the gate unless they have dedicated enforcement.
 
 Direct user shell commands entered with `!`/`!!` do not pass through the agent `tool_call` hook.
 
@@ -50,10 +50,11 @@ Schema:
 ```json
 {
   "model": "provider/model",
+  "fallbackModel": "openai-codex/codex-auto-review",
   "timeoutMs": 90000,
   "policy": "Additional policy text",
   "review": {
-    "tool.parameter": "always | outside-or-private | private-only | off"
+    "custom-tool.path": "always | outside-or-private | private-only | off"
   }
 }
 ```
@@ -61,10 +62,11 @@ Schema:
 Environment variables:
 
 - `PI_APPROVAL_GUARDIAN_MODEL`
+- `PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`
 - `PI_APPROVAL_GUARDIAN_TIMEOUT_MS`
 - `PI_APPROVAL_GUARDIAN_POLICY`
 
-Model and timeout precedence:
+Primary model, fallback model, and timeout precedence:
 
 ```text
 environment > trusted project > global > default
@@ -76,11 +78,15 @@ Policy composition:
 default policy + global policy + trusted-project policy + environment policy
 ```
 
-Malformed model, timeout, policy, or review configuration produces warnings and blocks covered tool execution fail-closed.
+Malformed primary/fallback model, timeout, policy, review container, review level, unknown top-level key, or unsupported review-rule key produces a fatal diagnostic. Because validation runs before action-scope classification, an invalid configuration blocks every agent `tool_call` intercepted by the extension, including calls that would otherwise be outside the review matrix. The schema is intentionally strict so a misspelled policy or rule cannot be silently ignored; remove obsolete metadata keys when upgrading. Review rules allow the documented built-in keys and arbitrary custom `<tool>.path` keys; other parameter names cannot be consumed at runtime. Model IDs may contain additional slashes after the provider separator.
+
+Reviewer channels are tried in this order after deduplicating equivalent model identities: configured primary, configured `fallbackModel`, then the current Pi session model as the final fallback. `fallbackModel` defaults to `openai-codex/codex-auto-review`. Guardian advances only when the prior channel is missing, lacks usable authentication, or returns an explicit failure. A timeout is terminal for the action and blocks fail-closed without trying another channel. An explicit allow, deny, or cancellation also stops the chain immediately. Each distinct reviewer channel that is reached receives the configured deadline and its own retry budget. The current model is used only as the model identity for a new isolated reviewer session; Guardian never reuses the main conversation session as reviewer state. Channel switches emit UI-only warnings and are not injected into agent context.
+
+`/approval-guardian` reports the primary, configured fallback, current-model fallback, timeout, policy sources, and config-file state. It resolves usable request authentication but does not send a reviewer inference. Startup health performs only the faster configured-auth check, including degraded and active-fallback status.
 
 ## Private-read classification
 
-Classification uses canonical paths and resolves existing symlinks. It is an explicit heuristic blacklist, not a complete DLP boundary.
+Classification normalizes leading `~`, `@`, `file://` URLs, and Pi's Unicode-space variants before resolving against the current directory. It then uses canonical paths and resolves existing symlinks. It is an explicit heuristic blacklist, not a complete DLP boundary.
 
 ### Common private files
 
@@ -97,7 +103,7 @@ Classification uses canonical paths and resolves existing symlinks. It is an exp
 - password stores, keychains, keyrings, password managers, and browser login stores
 - VPN and system credential locations
 - authenticated CLI configuration such as gcloud, GitHub CLI, GitLab CLI, 1Password CLI, and rclone
-- project `secrets/` and `credentials/` directories
+- project `secrets/` and `credentials/` directories (not a generic project `private/` directory)
 
 ### Pi data
 
@@ -171,7 +177,7 @@ Transcript, tool output, file content, retry reasons, and planned actions are fr
 
 ## Authorization contract
 
-A covered action executes only when the reviewer returns a valid assessment with `outcome: "allow"`.
+A covered action executes only when the reviewer returns a valid assessment with `outcome: "allow"`. Before allowing execution, Guardian validates the input as JSON-like data, deeply freezes it, and makes `event.input` non-writable/non-configurable, so later `tool_call` handlers cannot replace or mutate approved arguments. Exotic runtime values such as typed arrays, `Map`, `Set`, accessors, symbol-keyed properties, sparse arrays, or arrays with custom prototypes/properties fail closed instead of receiving a misleading lock guarantee. Extensions that need to rewrite a covered action must run before Guardian; they cannot rely on post-approval rewriting.
 
 Additional deterministic requirements:
 
@@ -199,11 +205,13 @@ Selection prioritizes the first and latest user intent, other user messages that
 
 ## Session reuse
 
-- The first review sends a bounded full transcript.
-- Successful assessments advance the reviewer transcript cursor.
-- Later reviews send only new transcript entries and the new planned action.
-- Reviewer calls are serialized.
-- Branch divergence, cwd/model/timeout/policy changes, reload, or shutdown dispose the old reviewer session.
+- Each distinct reviewer channel and review mode (normal versus private-data authorization) keeps its own isolated controller/session.
+- The first review on that channel sends a bounded full transcript.
+- Successful assessments advance that channel's reviewer transcript cursor.
+- Later reviews on the same channel send only new transcript entries and the new planned action.
+- Reviewer calls are serialized within each controller; Pi's current `tool_call` preflight contract also invokes sibling handlers sequentially.
+- Switching channels preserves the other channels' incremental reviewer state.
+- Branch divergence resets the affected reviewer session. Cwd/current-model/primary/fallback/timeout/policy changes, reload, or shutdown dispose all cached reviewer sessions.
 - Retry attempts use a fresh reviewer session and full bounded transcript.
 
 ## Retry and deadline
@@ -214,21 +222,27 @@ Selection prioritizes the first and latest user intent, other user messages that
 | Initial backoff | 200 ms |
 | Backoff factor | 2× |
 | Jitter | 0.9–1.1× |
-| Default shared deadline | 90 seconds |
-| Allowed timeout range | 1–300 seconds |
+| Default shared deadline per distinct reviewer channel | 90 seconds |
+| Allowed timeout range per distinct reviewer channel | 1–300 seconds |
 
 Retries apply to malformed assessment output and selected transient provider failures such as overload, rate limiting, HTTP 5xx, and transport/stream errors. Quota and billing exhaustion are terminal.
 
-Session startup, attempts, prompts, backoff, and cleanup share one deadline. Explicit allow/deny, cancellation, and terminal timeout are not retried.
+Within one reviewer channel, session startup, attempts, prompts, backoff, and cleanup share one deadline. Authentication resolution and time spent waiting behind an earlier serialized review currently occur before that controller deadline, so wall-clock latency can exceed the displayed value. A reached fallback channel receives a fresh configured deadline only when the preceding channel returned an explicit failure. Allow, deny, cancellation, and timeout are terminal and never activate another channel. Consequently, a reviewer that consumes the full 90-second default without producing a valid assessment blocks the action immediately instead of starting another 90-second fallback review. Missing-model and authentication failures normally switch quickly; other explicit failures may occur after provider/session work but before the deadline.
 
-## Denial circuit breaker
+## Usability and review frequency
+
+The default profile reviews every agent-issued `bash` command because arbitrary shell syntax cannot be safely reduced to a broad deterministic allowlist. `grep.path` defaults to `outside-or-private`, so an ordinary clean in-project source search bypasses reviewer inference; private selectors, private effective scopes, and outside-project searches still trigger review. Set `grep.path` to `always` for a stricter profile. Disabling `bash.command` removes a major security boundary and is recommended only when another trusted shell-approval or sandbox layer provides equivalent enforcement.
+
+Every allow or block result remains visible through a per-action UI notification so users can tell which calls were actually reviewed. Timeouts, channel switches, and health problems are also reported. Private-data reads intentionally require a new explicit user message identifying the exact path or clearly named private source and purpose. This extra turn is considered acceptable friction because it prevents broad project requests from silently authorizing credential access. Invalid configuration remains globally fail-closed as described above, so `/approval-guardian` should be checked immediately after editing configuration.
+
+## Adverse-outcome circuit breaker
 
 Within one Pi agent run, the circuit opens after:
 
-- three consecutive explicit-denial batches; or
-- ten explicit-denial batches among the latest fifty recorded review batches.
+- three consecutive adverse batches; or
+- ten adverse batches among the latest fifty recorded review batches.
 
-Sibling tool calls from the same assistant message share one batch. Multiple simultaneous denials therefore count once. A batch containing any explicit denial is a denial batch.
+Denied, timeout, and failure results are adverse; allowed and cancelled results are not. Sibling tool calls from the same assistant message share one batch, so multiple simultaneous adverse results count once.
 
 When the circuit opens, the current run is aborted and later covered actions are blocked without another reviewer call.
 
@@ -250,7 +264,8 @@ When the circuit opens, the current run is aborted and later covered actions are
 - Ordinary in-project source edits are intentionally not reviewed.
 - Path detection is heuristic and cannot identify every renamed or indirect secret.
 - Shell commands are not parsed as a complete shell AST.
-- Arbitrary pathless custom tools and unrelated MCP/network/browser/email/deployment/subagent actions are not automatically covered.
+- Arbitrary pathless or nested-path custom tools and unrelated MCP/network/browser/email/deployment/subagent actions are not automatically covered; they need dedicated enforcement.
+- Guardian locks approved `event.input` against later `tool_call` handlers, but cannot observe command prefixes, spawn hooks, or a custom tool's internal behavior after dispatch.
 - Filesystem state may change between classification and execution.
 - Reviewer decisions are probabilistic.
-- Reviewer/provider availability is required because failures block covered actions.
+- At least one distinct reviewer channel must be available; failure of the configured primary, configured fallback, and current-model fallback blocks covered actions.
