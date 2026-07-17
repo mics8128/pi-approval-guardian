@@ -95,12 +95,12 @@ export function loadGuardianConfig(
 		? readConfigFile(projectPath, warnings)
 		: {};
 
-	const modelValue = firstWithSource(
+	const modelValue = firstModelWithSource(
 		["environment", env[MODEL_ENV]],
 		["project", projectConfig.model],
 		["global", globalConfig.model],
 	);
-	const fallbackModelValue = firstWithSource(
+	const fallbackModelValue = firstModelWithSource(
 		["environment", env[FALLBACK_MODEL_ENV]],
 		["project", projectConfig.fallbackModel],
 		["global", globalConfig.fallbackModel],
@@ -288,11 +288,11 @@ function isModelSpecString(value: unknown): value is string {
 	);
 }
 
-function firstWithSource(
+function firstModelWithSource(
 	...values: Array<[GuardianConfig["modelSource"], unknown]>
 ): { source: GuardianConfig["modelSource"]; value: string } | undefined {
 	for (const [source, value] of values) {
-		if (typeof value === "string" && value.trim()) {
+		if (isModelSpecString(value)) {
 			return { source, value: value.trim() };
 		}
 	}

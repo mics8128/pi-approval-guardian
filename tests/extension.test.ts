@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -846,6 +846,115 @@ test("registers lifecycle health and verifies command authentication", async () 
 	assert.match(notices.join("\n"), /same as primary \(no separate channel\)/);
 	assert.match(notices.join("\n"), /Current-model fallback: unavailable/);
 	assert.doesNotMatch(notices.join("\n"), /Fallback unavailable:/);
+});
+
+test("warns and continues when configuration entries are unsupported", async () => {
+	const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
+	const commands = new Map<string, { handler: (args: string, ctx: never) => unknown }>();
+	approvalGuardian({
+		on: (name: string, handler: (event: unknown, ctx: never) => unknown) => {
+			handlers.set(name, handler);
+		},
+		registerCommand: (
+			name: string,
+			options: { handler: (args: string, ctx: never) => unknown },
+		) => commands.set(name, options),
+	} as never);
+
+	const root = mkdtempSync(join(tmpdir(), "guardian-config-warning-"));
+	const agentDir = join(root, "agent");
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(
+		join(agentDir, "approval-guardian.json"),
+		JSON.stringify({
+			review: {
+				"bash.command": "off",
+				"powershell.command": "always",
+				"pwsh-start-job.command": "always",
+			},
+		}),
+	);
+
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const previousModel = process.env.PI_APPROVAL_GUARDIAN_MODEL;
+	const previousFallback = process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL;
+	const previousTimeout = process.env.PI_APPROVAL_GUARDIAN_TIMEOUT_MS;
+	const previousPolicy = process.env.PI_APPROVAL_GUARDIAN_POLICY;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	delete process.env.PI_APPROVAL_GUARDIAN_MODEL;
+	delete process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL;
+	delete process.env.PI_APPROVAL_GUARDIAN_TIMEOUT_MS;
+	delete process.env.PI_APPROVAL_GUARDIAN_POLICY;
+
+	const statuses: Array<[string, string | undefined]> = [];
+	const notices: string[] = [];
+	const model = { provider: "openai-codex", id: "codex-auto-review" };
+	const branch = [
+		{
+			type: "message",
+			id: "config-warning-batch",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "config-warning-call" }],
+			},
+		},
+	];
+	const ctx = {
+		cwd: join(root, "project"),
+		isProjectTrusted: () => false,
+		modelRegistry: {
+			find: (provider: string, modelId: string) =>
+				provider === model.provider && modelId === model.id ? model : undefined,
+			hasConfiguredAuth: () => true,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }),
+		},
+		sessionManager: { getBranch: () => branch },
+		abort: () => undefined,
+		signal: undefined,
+		ui: {
+			setStatus: (key: string, value: string | undefined) =>
+				statuses.push([key, value]),
+			notify: (message: string) => notices.push(message),
+		},
+	} as never;
+
+	try {
+		await handlers.get("session_start")?.({}, ctx);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · ready · config warnings",
+		]);
+		assert.match(notices.join("\n"), /Invalid entries were ignored/);
+		assert.match(notices.join("\n"), /review\.powershell\.command/);
+		assert.match(notices.join("\n"), /review\.pwsh-start-job\.command/);
+
+		notices.length = 0;
+		const call = event("bash", { command: "echo still-runs" });
+		(call as { toolCallId: string }).toolCallId = "config-warning-call";
+		const result = await handlers.get("tool_call")?.(call, ctx);
+		assert.equal(result, undefined);
+		assert.equal(notices.length, 0, "the same warning should not repeat per tool call");
+
+		await commands.get("approval-guardian")?.handler("", ctx);
+		assert.match(notices.join("\n"), /Approval Guardian · ready · config warnings/);
+		assert.match(notices.join("\n"), /invalid entries ignored/);
+		assert.match(notices.join("\n"), /Primary: .* · ready/);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		if (previousModel === undefined)
+			delete process.env.PI_APPROVAL_GUARDIAN_MODEL;
+		else process.env.PI_APPROVAL_GUARDIAN_MODEL = previousModel;
+		if (previousFallback === undefined)
+			delete process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL;
+		else process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL = previousFallback;
+		if (previousTimeout === undefined)
+			delete process.env.PI_APPROVAL_GUARDIAN_TIMEOUT_MS;
+		else process.env.PI_APPROVAL_GUARDIAN_TIMEOUT_MS = previousTimeout;
+		if (previousPolicy === undefined)
+			delete process.env.PI_APPROVAL_GUARDIAN_POLICY;
+		else process.env.PI_APPROVAL_GUARDIAN_POLICY = previousPolicy;
+	}
 });
 
 test("private-data reviews expose no investigation tools", () => {

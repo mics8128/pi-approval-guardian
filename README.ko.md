@@ -141,6 +141,8 @@ Environment variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_FALLB
 
 Primary model/fallback model/timeout precedence: `environment > trusted project > global > built-in default`. Policy는 global, trusted project, environment 설정을 합산합니다.
 
+Malformed 또는 unsupported 설정은 UI warning을 표시한 뒤 무시되며, 나머지 valid settings와 built-in defaults는 계속 적용됩니다. 따라서 config typo가 tools 전체를 block하지 않습니다. Protected action은 reviewer가 valid allow를 반환하지 않으면 계속 fail closed입니다.
+
 `/approval-guardian`으로 primary, configured fallback, current-model fallback의 readiness와 config source를, `/approval-guardian rules`로 effective rules를 확인할 수 있습니다.
 
 ## 업데이트 / 제거
