@@ -141,6 +141,8 @@ Variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`, 
 
 Precedencia de primary model/fallback model/timeout: `environment > trusted project > global > built-in default`. La policy combina configuración global, trusted project y environment.
 
+Los ajustes malformed o unsupported muestran una advertencia en la UI y se ignoran; los ajustes válidos restantes y los built-in defaults siguen activos, por lo que un typo de configuración no bloquea globalmente las tools. Las acciones protegidas siguen fallando closed salvo que un reviewer devuelva un allow válido.
+
 Usa `/approval-guardian` para ver primary, configured fallback, current-model fallback y las fuentes de configuración; `/approval-guardian rules` muestra las reglas efectivas.
 
 ## Actualizar y eliminar

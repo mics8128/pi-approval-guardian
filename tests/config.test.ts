@@ -77,7 +77,7 @@ test("trusted project review rules cannot weaken the global floor", () => {
 	assert.equal(config.review["read.path"], "always");
 });
 
-test("reports invalid configured policy instead of silently dropping it", () => {
+test("warns and falls back to defaults for invalid configured values", () => {
 	const root = mkdtempSync(join(tmpdir(), "approval-guardian-"));
 	const agentDir = join(root, "agent");
 	mkdirSync(agentDir, { recursive: true });
@@ -99,6 +99,13 @@ test("reports invalid configured policy instead of silently dropping it", () => 
 	assert.equal(config.warnings.length, 4);
 	assert.match(config.warnings.join("\n"), /Invalid policy/);
 	assert.match(config.warnings.join("\n"), /fallbackModel/);
+	assert.equal(config.model, "openai-codex/codex-auto-review");
+	assert.equal(config.modelSource, "default");
+	assert.equal(config.fallbackModel, "openai-codex/codex-auto-review");
+	assert.equal(config.fallbackModelSource, "default");
+	assert.equal(config.timeoutMs, 90_000);
+	assert.equal(config.timeoutSource, "default");
+	assert.equal(config.policy, undefined);
 });
 
 test("accepts nested model IDs and reports config typos without rejecting custom path rules", () => {
@@ -135,12 +142,22 @@ test("accepts nested model IDs and reports config typos without rejecting custom
 	});
 });
 
-test("reports invalid environment overrides", () => {
+test("warns and skips invalid environment overrides", () => {
 	const root = mkdtempSync(join(tmpdir(), "approval-guardian-"));
+	const agentDir = join(root, "agent");
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(
+		join(agentDir, "approval-guardian.json"),
+		JSON.stringify({
+			model: "global/reviewer",
+			fallbackModel: "global/fallback",
+			timeoutMs: 45_000,
+		}),
+	);
 	const config = loadGuardianConfig({
 		cwd: join(root, "project"),
 		projectTrusted: false,
-		agentDir: join(root, "agent"),
+		agentDir,
 		env: {
 			PI_APPROVAL_GUARDIAN_MODEL: "missing-slash",
 			PI_APPROVAL_GUARDIAN_FALLBACK_MODEL: "also-missing-slash",
@@ -148,6 +165,12 @@ test("reports invalid environment overrides", () => {
 		},
 	});
 	assert.equal(config.warnings.length, 3);
+	assert.equal(config.model, "global/reviewer");
+	assert.equal(config.modelSource, "global");
+	assert.equal(config.fallbackModel, "global/fallback");
+	assert.equal(config.fallbackModelSource, "global");
+	assert.equal(config.timeoutMs, 45_000);
+	assert.equal(config.timeoutSource, "global");
 });
 
 test("uses an environment model ID containing nested slashes", () => {

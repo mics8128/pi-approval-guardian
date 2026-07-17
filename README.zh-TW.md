@@ -158,6 +158,8 @@ PI_APPROVAL_GUARDIAN_POLICY
 
 Primary model、fallback model 與 timeout precedence：`environment > trusted project > global > built-in default`。Policy 會合併 global、trusted project 與 environment 設定。
 
+格式錯誤或不支援的設定只會顯示 UI 警告並被忽略；其餘有效設定與內建預設仍會生效，因此設定 typo 不會全域阻擋工具。受保護動作若未取得 reviewer 的有效 allow，仍然會 fail closed。
+
 執行 `/approval-guardian` 可查看 primary、設定 fallback、current-model fallback 的 readiness 與有效設定來源；`/approval-guardian rules` 可查看生效中的規則。
 
 ## 更新與移除

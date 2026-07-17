@@ -141,6 +141,8 @@ off < private-only < outside-or-private < always
 
 Primary model、fallback model 与 timeout precedence：`environment > trusted project > global > built-in default`。Policy 会合并 global、trusted project 和 environment 配置。
 
+格式错误或不支持的配置只会显示 UI 警告并被忽略；其余有效配置与内置默认值仍会生效，因此配置 typo 不会全局阻塞工具。受保护动作如果没有取得 reviewer 的有效 allow，仍会 fail closed。
+
 运行 `/approval-guardian` 可查看 primary、配置 fallback、current-model fallback 的 readiness 与有效配置来源；`/approval-guardian rules` 可查看生效规则。
 
 ## 更新与移除

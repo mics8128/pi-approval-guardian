@@ -141,6 +141,8 @@ Environment variables：`PI_APPROVAL_GUARDIAN_MODEL`、`PI_APPROVAL_GUARDIAN_FAL
 
 Primary model/fallback model/timeout precedence：`environment > trusted project > global > built-in default`。Policy は global、trusted project、environment の設定を加算します。
 
+Malformed または unsupported な設定は UI warning を表示して無視され、残りの valid settings と built-in defaults が有効なままなので、config typo が tools を global に block することはありません。Protected action は reviewer が valid allow を返さない限り引き続き fail closed です。
+
 `/approval-guardian` で primary、configured fallback、current-model fallback の readiness と config source、`/approval-guardian rules` で effective rules を確認できます。
 
 ## Update / remove

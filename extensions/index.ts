@@ -146,12 +146,6 @@ export function guardianHealth(
 	registry: ExtensionContext["modelRegistry"],
 	currentModel?: ExtensionContext["model"],
 ): GuardianHealth {
-	if (config.warnings.length > 0) {
-		return {
-			ready: false,
-			reason: `Guardian configuration is invalid: ${config.warnings.join(" ")}`,
-		};
-	}
 	const channels = buildReviewerChannels(config, registry, currentModel);
 	const issues = channels.map((channel) => reviewerChannelIssue(channel, registry));
 	const primaryIssue = issues[0];
@@ -357,16 +351,32 @@ function freezeJsonLike(value: unknown, seen = new WeakSet<object>()): void {
 export default function approvalGuardian(pi: ExtensionAPI) {
 	let activeReviews = 0;
 	let idleStatus: string | undefined;
+	let configurationWarningsActive = false;
+	let configurationWarningKey: string | undefined;
 	const reviewerSwitchNoticeKeys = new Set<string>();
 	const controllers = new Map<string, ReviewerSessionController>();
 	let controllerContextKey: string | undefined;
 	const circuitBreaker = new DenialCircuitBreaker();
 	const reviewBatches = new ReviewBatchTracker();
 
+	const displayedIdleStatus = (): string | undefined =>
+		idleStatus && configurationWarningsActive
+			? `${idleStatus} · config warnings`
+			: idleStatus;
+
+	const refreshIdleStatus = (ctx: ExtensionContext) => {
+		if (activeReviews === 0 && idleStatus !== undefined) {
+			ctx.ui.setStatus("approval-guardian", displayedIdleStatus());
+		}
+	};
+
 	const resetRuntime = () => {
 		for (const controller of controllers.values()) controller.dispose();
 		controllers.clear();
 		controllerContextKey = undefined;
+		idleStatus = undefined;
+		configurationWarningsActive = false;
+		configurationWarningKey = undefined;
 		reviewerSwitchNoticeKeys.clear();
 		circuitBreaker.reset();
 		reviewBatches.reset();
@@ -374,9 +384,32 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 
 	const setIdleStatus = (ctx: ExtensionContext, status: string) => {
 		idleStatus = status;
-		if (activeReviews === 0) {
-			ctx.ui.setStatus("approval-guardian", status);
+		refreshIdleStatus(ctx);
+	};
+
+	const syncConfigurationWarnings = (
+		ctx: ExtensionContext,
+		warnings: string[],
+	) => {
+		const nextKey = warnings.length > 0 ? warnings.join("\n") : undefined;
+		const nextActive = nextKey !== undefined;
+		if (configurationWarningsActive !== nextActive) {
+			configurationWarningsActive = nextActive;
+			refreshIdleStatus(ctx);
 		}
+		if (!nextKey) {
+			configurationWarningKey = undefined;
+			return;
+		}
+		if (configurationWarningKey === nextKey) return;
+		configurationWarningKey = nextKey;
+		ctx.ui.notify(
+			[
+				"Approval Guardian configuration warning. Invalid entries were ignored; remaining valid settings and built-in defaults are active.",
+				...warnings,
+			].join("\n"),
+			"warning",
+		);
 	};
 
 	const notifyReviewerSwitch = (
@@ -384,13 +417,12 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		from: ReviewerChannel,
 		to: ReviewerChannel,
 	) => {
-		idleStatus =
+		setIdleStatus(
+			ctx,
 			to.role === "current-model"
 				? "Guardian · current-model fallback"
-				: "Guardian · fallback";
-		if (activeReviews === 0) {
-			ctx.ui.setStatus("approval-guardian", idleStatus);
-		}
+				: "Guardian · fallback",
+		);
 		const key = `${from.role}:${from.modelSpec}→${to.role}:${to.modelSpec}`;
 		if (reviewerSwitchNoticeKeys.has(key)) return;
 		reviewerSwitchNoticeKeys.add(key);
@@ -414,6 +446,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			projectTrusted: ctx.isProjectTrusted(),
 		});
+		syncConfigurationWarnings(ctx, config.warnings);
 		const channels = buildReviewerChannels(
 			config,
 			ctx.modelRegistry,
@@ -456,6 +489,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	): Promise<void> => {
 		const projectTrusted = ctx.isProjectTrusted();
 		const config = loadGuardianConfig({ cwd: ctx.cwd, projectTrusted });
+		syncConfigurationWarnings(ctx, config.warnings);
 		const primaryChannel = reviewerChannelForSpec(
 			"primary",
 			config.model,
@@ -490,24 +524,19 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		};
 		const issues = new Map<string, string | undefined>();
 		let issue: string | undefined;
-		let selectedIndex = -1;
-		if (config.warnings.length > 0) {
-			issue = `Guardian configuration is invalid: ${config.warnings.join(" ")}`;
-		} else {
-			for (const channel of channels) {
-				issues.set(reviewerChannelIdentity(channel), await checkChannel(channel));
-			}
-			selectedIndex = channels.findIndex(
-				(channel) => !issues.get(reviewerChannelIdentity(channel)),
-			);
-			if (selectedIndex < 0) {
-				issue = channels
-					.map(
-						(channel) =>
-							`${reviewerChannelLabel(channel.role)} unavailable: ${issues.get(reviewerChannelIdentity(channel))}`,
-					)
-					.join(" ");
-			}
+		for (const channel of channels) {
+			issues.set(reviewerChannelIdentity(channel), await checkChannel(channel));
+		}
+		const selectedIndex = channels.findIndex(
+			(channel) => !issues.get(reviewerChannelIdentity(channel)),
+		);
+		if (selectedIndex < 0) {
+			issue = channels
+				.map(
+					(channel) =>
+						`${reviewerChannelLabel(channel.role)} unavailable: ${issues.get(reviewerChannelIdentity(channel))}`,
+				)
+				.join(" ");
 		}
 		const ready = selectedIndex >= 0 && issue === undefined;
 		const selectedChannel = ready ? channels[selectedIndex] : undefined;
@@ -518,7 +547,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			channels
 				.slice(1)
 				.every((channel) => issues.get(reviewerChannelIdentity(channel)));
-		const statusLabel = !ready
+		const operationalStatusLabel = !ready
 			? "needs attention"
 			: selectedChannel?.role === "current-model"
 				? "ready via current model"
@@ -527,12 +556,12 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 					: degradedFallback
 						? "ready · fallback unavailable"
 						: "ready";
-		const channelStatus = (channelIssue: string | undefined) =>
+		const statusLabel =
 			config.warnings.length > 0
-				? "not checked"
-				: channelIssue
-					? "unavailable"
-					: "ready";
+				? `${operationalStatusLabel} · config warnings`
+				: operationalStatusLabel;
+		const channelStatus = (channelIssue: string | undefined) =>
+			channelIssue ? "unavailable" : "ready";
 		const primaryIdentity = reviewerChannelIdentity(primaryChannel);
 		const configuredIdentity = reviewerChannelIdentity(
 			configuredFallbackChannel,
@@ -605,12 +634,18 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				`Policy: ${config.policy ? `customized (${config.policySources.join(" + ")})` : "default"}`,
 				`Global config: ${config.globalConfigPresent ? "present" : "absent"} · ${config.globalPath}`,
 				`Project config: ${projectConfigStatus} · ${config.projectPath}`,
+				config.warnings.length > 0
+					? `Configuration: ${config.warnings.length} warning(s); invalid entries ignored, remaining valid settings and defaults active.`
+					: "Configuration: valid",
 				...details,
 				...unavailableBeforeSelected,
 				...unavailableBackups,
+				...config.warnings.map((warning) => `Configuration warning: ${warning}`),
 				...(issue ? [issue] : []),
 			].join("\n"),
-			ready && !degradedFallback ? "info" : "warning",
+			ready && !degradedFallback && config.warnings.length === 0
+				? "info"
+				: "warning",
 		);
 	};
 
@@ -639,15 +674,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				projectTrusted: ctx.isProjectTrusted(),
 			});
-			if (config.warnings.length > 0) {
-				return {
-					block: true,
-					reason: [
-						"Approval Guardian configuration is invalid, so tool execution failed closed.",
-						...config.warnings,
-					].join("\n"),
-				};
-			}
+			syncConfigurationWarnings(ctx, config.warnings);
 			const action = actionFromToolCall(event, ctx.cwd, config.review);
 			if (!action) return;
 
@@ -759,7 +786,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			activeReviews--;
 			ctx.ui.setStatus(
 				"approval-guardian",
-				activeReviews > 0 ? reviewStatus(activeReviews) : idleStatus,
+				activeReviews > 0 ? reviewStatus(activeReviews) : displayedIdleStatus(),
 			);
 		}
 	}

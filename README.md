@@ -172,6 +172,8 @@ environment > trusted project > global > built-in default
 
 Policy is additive across global, trusted-project, and environment configuration.
 
+Malformed or unsupported settings produce UI warnings and are ignored; remaining valid settings and built-in defaults stay active, so a configuration typo does not globally block tools. Covered actions still fail closed unless a reviewer returns a valid allow decision.
+
 Run `/approval-guardian` to inspect primary, configured-fallback, and current-model readiness plus effective config sources, or `/approval-guardian rules` for the rule matrix.
 
 ## Update and remove
