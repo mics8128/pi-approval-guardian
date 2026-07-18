@@ -184,7 +184,7 @@ When you intentionally need to suspend review for the current Pi runtime:
 /approval-guardian bypass
 ```
 
-The footer continuously shows `Guardian · BYPASSED`, and a one-line warning remains below the editor even when another extension replaces the footer. Covered agent tool calls then proceed without Guardian classification, reviewer inference, approved-input locking, or circuit enforcement; other extensions and tool-internal checks still apply. Restore protection with:
+A one-line warning remains below the editor for the entire bypass. Covered agent tool calls then proceed without Guardian classification, reviewer inference, approved-input locking, or circuit enforcement; other extensions and tool-internal checks still apply. Restore protection with:
 
 ```text
 /approval-guardian enable

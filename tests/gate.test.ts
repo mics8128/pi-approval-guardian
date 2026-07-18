@@ -219,9 +219,11 @@ test("requires review for common Linux, macOS, and Windows private locations", (
 		"/etc/ssl/private/server.key",
 		"/Users/test/Library/Keychains/login.keychain-db",
 		"/Users/test/Library/Application Support/Google/Chrome/Default/Login Data",
+		"/Users/test/Library/Application Support/Google/Chrome/Default/Preferences",
 		"C:\\Users\\test\\.ssh\\id_ed25519",
 		"C:\\Users\\test\\AppData\\Roaming\\Microsoft\\Credentials\\token",
 		"C:\\Users\\test\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data",
+		"C:\\Users\\test\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local State",
 		"C:\\Windows\\System32\\config\\SAM",
 	]) {
 		const target = classifyReadPath(path, "/repo/project");

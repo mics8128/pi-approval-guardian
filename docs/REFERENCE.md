@@ -90,7 +90,7 @@ Reviewer channels are tried in this order after deduplicating equivalent model i
 
 While bypass is active:
 
-- the footer status remains `Guardian · BYPASSED`, and a persistent one-line `belowEditor` widget remains visible even when another extension replaces the footer; toggle/status notifications are UI-only;
+- a persistent one-line `belowEditor` widget remains visible for the entire bypass; toggle and status-detail notifications are UI-only;
 - the `tool_call` hook returns before batch lookup, configuration loading, classification, reviewer inference, deterministic allow checks, approved-input locking, and circuit enforcement;
 - no per-action Guardian allow/block notification is emitted because the action was not reviewed;
 - other extensions and tool-internal checks remain active; bypass disables only Approval Guardian's hook;
@@ -99,11 +99,13 @@ While bypass is active:
 
 The bypass does not release or retry an already blocked/in-flight tool call, trigger an agent turn, or grant task authorization. It is not persisted to the session file and resets on every `session_start` lifecycle, including startup/reload/new/resume/fork, as well as process restart.
 
-Guardian intentionally does not inject bypass or re-enable state into agent messages, the system prompt, or other model context. A one-shot persisted “bypassed” message could remain stale after re-enabling and could be misread as permission; the user must separately instruct the agent what work to perform. The persistent footer status plus below-editor widget are the user-facing safety signals.
+Guardian intentionally does not inject bypass or re-enable state into agent messages, the system prompt, or other model context. A one-shot persisted “bypassed” message could remain stale after re-enabling and could be misread as permission; the user must separately instruct the agent what work to perform. The persistent below-editor widget is the user-facing safety signal.
 
 ## Private-read classification
 
 Classification normalizes leading `~`, `@`, `file://` URLs, and Pi's Unicode-space variants before resolving against the current directory. It then uses canonical paths and resolves existing symlinks. It is an explicit heuristic blacklist, not a complete DLP boundary.
+
+The auditable rule catalogs live in [`src/path-rules.ts`](../src/path-rules.ts). Structured path tools and literal path candidates extracted from `bash` commands both use the same `classifyReadPath()` implementation. Shell token and glob recognition remains conservative and heuristic, but its representative glob candidates are derived from the same catalog instead of maintaining a separate private-path list.
 
 ### Common private files
 
@@ -230,6 +232,7 @@ Selection prioritizes the first and latest user intent, other user messages that
 - Switching channels preserves the other channels' incremental reviewer state.
 - Branch divergence resets the affected reviewer session. Cwd/current-model/primary/fallback/timeout/policy changes, reload, or shutdown dispose all cached reviewer sessions.
 - Retry attempts use a fresh reviewer session and full bounded transcript.
+- Session startup is generation-guarded: a late completion from a timed-out, cancelled, reset, or disposed startup is discarded and cannot replace a newer reviewer session.
 
 ## Retry and deadline
 

@@ -19,6 +19,17 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ReviewLevel } from "./config.ts";
+import {
+	hasSensitiveMutationSuffix,
+	isCommonPrivateDirectory,
+	isPiPrivatePath,
+	isPrivateReadBasename,
+	isProjectPrivateSegment,
+	isSensitiveMutationBasename,
+	isSensitiveMutationSegment,
+	isSensitivePiMutationPath,
+	isShellProfileBasename,
+} from "./path-rules.ts";
 import type { GuardianAssessment } from "./review.ts";
 
 export const GUARDIAN_REVIEW_MAX_ATTEMPTS = 3;
@@ -103,177 +114,6 @@ export class ReviewBatchTracker {
 	}
 }
 
-const SENSITIVE_BASENAMES = new Set([
-	".env",
-	"credentials",
-	"credentials.json",
-	"secrets.json",
-	"authorized_keys",
-	"known_hosts",
-	"config.toml",
-	"settings.json",
-	"approval-guardian.json",
-	"package.json",
-	"package-lock.json",
-	"pnpm-lock.yaml",
-	"yarn.lock",
-	".gitlab-ci.yml",
-	"docker-compose.yml",
-	"docker-compose.yaml",
-	"compose.yml",
-	"compose.yaml",
-]);
-
-const SENSITIVE_SEGMENTS = new Set([
-	".ssh",
-	".gnupg",
-	".aws",
-	".kube",
-	".git",
-	".github",
-	"secrets",
-	"credentials",
-	"terraform",
-	"k8s",
-	"kubernetes",
-]);
-
-const SENSITIVE_SUFFIXES = [".pem", ".key", ".p12", ".pfx", ".tf", ".tfvars"];
-const SHELL_PROFILE_PATTERN =
-	/^\.(?:zshrc|zprofile|zlogin|bashrc|bash_profile|profile)$/;
-
-const PRIVATE_READ_BASENAMES = new Set([
-	".env",
-	".netrc",
-	".npmrc",
-	".pypirc",
-	".git-credentials",
-	"auth.json",
-	"token.json",
-	"tokens.json",
-	"cookies.sqlite",
-	"login data",
-	"logins.json",
-	"key4.db",
-	"nuget.config",
-	"credentials.tfrc.json",
-	"credentials",
-	"credentials.json",
-	"secrets.json",
-	"authorized_keys",
-	"id_rsa",
-	"id_ed25519",
-	"id_ecdsa",
-	"id_dsa",
-]);
-
-const PROJECT_PRIVATE_SEGMENTS = new Set([
-	"secrets",
-	"secret",
-	"credentials",
-]);
-const EXTERNAL_PRIVATE_SEGMENTS = new Set([
-	".ssh",
-	".gnupg",
-	".aws",
-	".azure",
-	".kube",
-	".docker",
-	".password-store",
-	".mozilla",
-	"keychains",
-	"keyrings",
-	"credentials",
-	"vault",
-	"vaults",
-	"1password",
-	"bitwarden",
-	"keepass",
-	"keepassxc",
-	"wireguard",
-	"openvpn",
-	".openvpn",
-	".terraform.d",
-	".gem",
-	".bundle",
-]);
-const EXTERNAL_PRIVATE_CONFIG_SEGMENTS = new Set([
-	"gcloud",
-	"gh",
-	"glab",
-	"op",
-	"rclone",
-	"hub",
-	"google-chrome",
-	"chromium",
-	"bravesoftware",
-	"microsoft-edge",
-	"sops",
-	"age",
-]);
-const PRIVATE_PATH_FRAGMENTS = [
-	"/library/application support/google/chrome/",
-	"/library/application support/chromium/",
-	"/library/application support/firefox/",
-	"/library/application support/bravesoftware/",
-	"/library/application support/1password/",
-	"/library/application support/bitwarden/",
-	"/library/keychains/",
-	"/library/mobiledevice/provisioning profiles/",
-	"/appdata/roaming/gnupg/",
-	"/appdata/roaming/gcloud/",
-	"/appdata/roaming/github cli/",
-	"/appdata/roaming/1password/",
-	"/appdata/roaming/bitwarden/",
-	"/appdata/roaming/mozilla/firefox/profiles/",
-	"/appdata/roaming/microsoft/credentials/",
-	"/appdata/local/microsoft/credentials/",
-	"/appdata/local/google/chrome/user data/",
-	"/appdata/local/chromium/user data/",
-	"/appdata/local/microsoft/edge/user data/",
-	"/windows/system32/config/",
-	"/programdata/ssh/",
-	"/etc/ssl/private/",
-	"/etc/networkmanager/system-connections/",
-	"/etc/wireguard/",
-	"/etc/openvpn/",
-	"/var/lib/private/",
-];
-const PRIVATE_READ_SUFFIXES = [
-	".pem",
-	".key",
-	".p12",
-	".pfx",
-	".jks",
-	".keystore",
-	".kdbx",
-	".tfvars",
-];
-
-const PI_PRIVATE_ROOT_FILES = new Set([
-	"settings.json",
-	"web-search.json",
-	"knowledge-search-.json",
-]);
-const PI_PRIVATE_AGENT_FILES = new Set([
-	"auth.json",
-	"approval-guardian.json",
-	"models-store.json",
-	"models.json",
-	"run-history.jsonl",
-	"settings.json",
-	"trust.json",
-]);
-
-function startsWithSegments(values: string[], prefix: string[]): boolean {
-	return prefix.every((segment, index) => values[index] === segment);
-}
-
-function piRelativeSegments(segments: string[]): string[] | undefined {
-	const piIndex = segments.lastIndexOf(".pi");
-	return piIndex >= 0 ? segments.slice(piIndex + 1) : undefined;
-}
-
 const PI_INSTALLED_PACKAGE_ROOTS = [
 	resolve(homedir(), ".pi", "agent", "npm", "node_modules"),
 	resolve(homedir(), ".pi", "npm", "node_modules"),
@@ -285,73 +125,6 @@ function isInstalledPiPackagePath(absolutePath: string): boolean {
 		const rel = relative(root, absolutePath);
 		return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 	});
-}
-
-const PI_SENSITIVE_MUTATION_DIRECTORIES = new Set([
-	"agents",
-	"chains",
-	"extensions",
-	"git",
-	"npm",
-	"prompts",
-	"skills",
-	"themes",
-]);
-
-function isSensitivePiMutationPath(segments: string[]): boolean {
-	const relativeSegments = piRelativeSegments(segments);
-	if (!relativeSegments) return false;
-	if (relativeSegments.length === 0) return true;
-	return PI_SENSITIVE_MUTATION_DIRECTORIES.has(relativeSegments[0] ?? "");
-}
-
-function isPiPrivatePath(segments: string[], file: string): boolean {
-	const relativeSegments = piRelativeSegments(segments);
-	if (!relativeSegments || relativeSegments.length === 0) return false;
-	if (
-		relativeSegments[0] === "memory" ||
-		relativeSegments[0] === "pi-acp" ||
-		relativeSegments[0]?.startsWith("knowledge-search-") === true
-	) {
-		return true;
-	}
-
-	if (relativeSegments.length === 1) {
-		return PI_PRIVATE_ROOT_FILES.has(file);
-	}
-
-	if (relativeSegments[0] === "agent") {
-		if (
-			relativeSegments[1] === "sessions" ||
-			startsWithSegments(relativeSegments, ["agent", "delegates", "jobs"])
-		) {
-			return true;
-		}
-		if (relativeSegments.length === 2) {
-			return (
-				PI_PRIVATE_AGENT_FILES.has(file) ||
-				file.startsWith("settings.json.") ||
-				file.startsWith("models.json.") ||
-				file.endsWith("-api-key")
-			);
-		}
-		if (relativeSegments[1]?.startsWith("archive-")) {
-			return (
-				file.includes("api-key") ||
-				file.endsWith(".log") ||
-				file.startsWith("settings.json") ||
-				file.includes("models.json")
-			);
-		}
-	}
-
-	return (
-		startsWithSegments(relativeSegments, ["context-mode", "content"]) ||
-		startsWithSegments(relativeSegments, ["context-mode", "sessions"]) ||
-		startsWithSegments(relativeSegments, ["session-search", "index"]) ||
-		(startsWithSegments(relativeSegments, ["session-search"]) &&
-			file === "config.json")
-	);
 }
 
 export interface MutationReviewTarget {
@@ -431,18 +204,6 @@ function isOutsideProject(
 	return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
 
-function isCredentialLikeBasename(file: string): boolean {
-	return (
-		file === "service-account" ||
-		/^service-account(?:[-_.][a-z0-9_-]+)?\.(?:json|ya?ml|pem|key)$/i.test(
-			file,
-		) ||
-		/^passwords?(?:(?:[-_.](?:store|vault|secret|secrets|credential|credentials|token|tokens|hash|hashes))(?:\.(?:json|ya?ml|txt|csv|db))?|\.(?:json|ya?ml|txt|csv|db))?$/i.test(
-			file,
-		)
-	);
-}
-
 export function classifyMutationPath(
 	path: string,
 	cwd: string,
@@ -461,12 +222,11 @@ export function classifyMutationPath(
 	const privatePath = classifyReadPath(path, cwd).private;
 	const sensitive =
 		privatePath ||
-		SENSITIVE_BASENAMES.has(file) ||
-		file.startsWith(".env.") ||
-		SHELL_PROFILE_PATTERN.test(file) ||
-		SENSITIVE_SUFFIXES.some((suffix) => file.endsWith(suffix)) ||
+		isSensitiveMutationBasename(file) ||
+		isShellProfileBasename(file) ||
+		hasSensitiveMutationSuffix(file) ||
 		normalizedSegments.some((segment) =>
-			SENSITIVE_SEGMENTS.has(segment.toLowerCase()),
+			isSensitiveMutationSegment(segment.toLowerCase()),
 		) ||
 		isSensitivePiMutationPath(
 			normalizedSegments.map((segment) => segment.toLowerCase()),
@@ -507,32 +267,13 @@ export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 		.map((segment) => segment.toLowerCase());
 	const file = normalizedSegments.at(-1) ?? "";
 	const installedPiPackage = isInstalledPiPackagePath(absolutePath);
-	const privateBasename =
-		PRIVATE_READ_BASENAMES.has(file) ||
-		file.startsWith(".env.") ||
-		isCredentialLikeBasename(file) ||
-		file.endsWith(".secret") ||
-		file.endsWith(".secrets") ||
-		PRIVATE_READ_SUFFIXES.some((suffix) => file.endsWith(suffix));
+	const privateBasename = isPrivateReadBasename(file);
 	const projectPrivateSegment = normalizedSegments.some(
 		(segment) =>
-			PROJECT_PRIVATE_SEGMENTS.has(segment) &&
+			isProjectPrivateSegment(segment) &&
 			!(installedPiPackage && segment === "private"),
 	);
-	const privateDirectory =
-		normalizedSegments.some((segment) =>
-			EXTERNAL_PRIVATE_SEGMENTS.has(segment),
-		) ||
-		normalizedSegments.some(
-			(segment, index) =>
-				segment === ".config" &&
-				EXTERNAL_PRIVATE_CONFIG_SEGMENTS.has(
-					normalizedSegments[index + 1] ?? "",
-				),
-		) ||
-		PRIVATE_PATH_FRAGMENTS.some((fragment) =>
-			`/${normalizedSegments.join("/")}/`.includes(fragment),
-		);
+	const privateDirectory = isCommonPrivateDirectory(normalizedSegments);
 	const piPrivate = isPiPrivatePath(normalizedSegments, file);
 	const privatePath =
 		privateBasename || projectPrivateSegment || privateDirectory || piPrivate;

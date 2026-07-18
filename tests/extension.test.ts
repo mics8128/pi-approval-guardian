@@ -64,6 +64,18 @@ test("routes private read and grep paths to the reviewer", () => {
 		{ ...DEFAULT_REVIEW_RULES },
 	);
 	assert.equal(globbed?.payload.private_data_read, true);
+	for (const glob of [
+		"**/.env.local",
+		"**/.config/{gh,gcloud}/**",
+		"**/{wireguard,openvpn}/**",
+	]) {
+		const selector = actionFromToolCall(
+			event("grep", { path: ".", pattern: "token", glob }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(selector?.payload.private_data_read, true, glob);
+	}
 	for (const glob of ["*", "**/*", "**/{.env,.npmrc}"]) {
 		const broadGlob = actionFromToolCall(
 			event("grep", { path: ".", pattern: "token", glob }),
@@ -129,6 +141,51 @@ test("marks obvious shell private-data access for high authorization", () => {
 			{ ...DEFAULT_REVIEW_RULES },
 		);
 		assert.equal(action?.payload.private_data_read, true, command);
+	}
+});
+
+test("shares structured private-path rules with shell literals and globs", () => {
+	for (const path of [
+		"/home/test/.config/gcloud/application_default_credentials.json",
+		"/home/test/.config/gh/hosts.yml",
+		"/etc/wireguard/wg0.conf",
+		"/etc/openvpn/client.conf",
+		"/Users/test/Library/Application Support/Google/Chrome/Default/Preferences",
+		"C:\\Users\\test\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local State",
+		"C:\\Windows\\System32\\config\\SAM",
+	]) {
+		const action = actionFromToolCall(
+			event("bash", { command: `cat ${JSON.stringify(path)}` }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, true, path);
+	}
+
+	for (const command of [
+		"cat /Users/test/Library/Application\\ Support/Google/Chrome/Default/Preferences",
+		"cat ~/.config/{gh,gcloud}/*",
+		"cat /etc/{wireguard,openvpn}/*",
+	]) {
+		const action = actionFromToolCall(
+			event("bash", { command }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, true, command);
+	}
+
+	for (const command of [
+		"cat docs/config.yml",
+		"cat src/password-reset.ts",
+		'cat "/Users/test/Documents/Login Data notes.txt"',
+	]) {
+		const action = actionFromToolCall(
+			event("bash", { command }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, false, command);
 	}
 });
 
@@ -532,7 +589,7 @@ test("wires primary failure through fallback and keeps fallback diagnostics UI-o
 		signal: undefined,
 		abort: () => undefined,
 		ui: {
-			setStatus: () => undefined,
+			setStatus: () => assert.fail("Guardian must not write footer status"),
 			notify: (message: string) => notices.push(message),
 		},
 	} as never;
@@ -791,7 +848,7 @@ test("uses the current session model as the final healthy fallback", () => {
 	});
 });
 
-test("registers lifecycle health and verifies command authentication", async () => {
+test("reports lifecycle health without writing footer status", async () => {
 	const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
 	const commands = new Map<string, { handler: (args: string, ctx: never) => unknown }>();
 	approvalGuardian({
@@ -822,7 +879,7 @@ test("registers lifecycle health and verifies command authentication", async () 
 			notify: (message: string) => notices.push(message),
 		},
 	} as never);
-	assert.deepEqual(calls, [["approval-guardian", "Guardian · needs attention"]]);
+	assert.equal(calls.length, 0);
 	assert.match(notices.join("\n"), /authentication is unavailable/);
 
 	calls.length = 0;
@@ -841,14 +898,14 @@ test("registers lifecycle health and verifies command authentication", async () 
 			notify: (message: string) => notices.push(message),
 		},
 	} as never);
-	assert.deepEqual(calls, [["approval-guardian", "Guardian · needs attention"]]);
+	assert.equal(calls.length, 0);
 	assert.match(notices.join("\n"), /authentication is unavailable/);
 	assert.match(notices.join("\n"), /same as primary \(no separate channel\)/);
 	assert.match(notices.join("\n"), /Current-model fallback: unavailable/);
 	assert.doesNotMatch(notices.join("\n"), /Fallback unavailable:/);
 });
 
-test("temporarily bypasses reviews with a persistent UI-only warning", async () => {
+test("temporarily bypasses reviews with only a persistent below-editor warning", async () => {
 	const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
 	const commands = new Map<
 		string,
@@ -950,10 +1007,7 @@ test("temporarily bypasses reviews with a persistent UI-only warning", async () 
 
 	try {
 		await handlers.get("session_start")?.({}, ctx);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · ready",
-		]);
+		assert.equal(statuses.length, 0);
 		assert.deepEqual(
 			command.getArgumentCompletions?.("")?.map(({ value }) => value),
 			["rules", "bypass", "enable"],
@@ -962,10 +1016,7 @@ test("temporarily bypasses reviews with a persistent UI-only warning", async () 
 		notices.length = 0;
 		await command.handler("bypass", ctx);
 		assert.equal(waitForIdleCalls, 1);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · BYPASSED",
-		]);
+		assert.equal(statuses.length, 0);
 		assert.equal(widgets.at(-1)?.[0], "approval-guardian-bypass");
 		assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /BYPASSED/);
 		assert.equal(widgets.at(-1)?.[2]?.placement, "belowEditor");
@@ -989,23 +1040,18 @@ test("temporarily bypasses reviews with a persistent UI-only warning", async () 
 		assert.match(notices.join("\n"), /BYPASSED · underlying ready/);
 		assert.match(notices.join("\n"), /reviews disabled/);
 		assert.doesNotMatch(notices.join("\n"), /BYPASSED[^\n]*fail-closed/);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · BYPASSED",
-		]);
+		assert.equal(statuses.length, 0);
 
 		notices.length = 0;
 		await command.handler("bypass", ctx);
 		assert.equal(waitForIdleCalls, 2);
 		assert.match(notices.join("\n"), /already temporarily bypassed/);
+		assert.equal(statuses.length, 0);
 
 		notices.length = 0;
 		await command.handler("enable", ctx);
 		assert.equal(waitForIdleCalls, 3);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · ready",
-		]);
+		assert.equal(statuses.length, 0);
 		assert.deepEqual(widgets.at(-1), [
 			"approval-guardian-bypass",
 			undefined,
@@ -1017,10 +1063,7 @@ test("temporarily bypasses reviews with a persistent UI-only warning", async () 
 		await command.handler("enable", ctx);
 		assert.equal(waitForIdleCalls, 4);
 		assert.match(notices.join("\n"), /already enabled/);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · ready",
-		]);
+		assert.equal(statuses.length, 0);
 
 		branch = [
 			{
@@ -1037,13 +1080,11 @@ test("temporarily bypasses reviews with a persistent UI-only warning", async () 
 		assert.equal(await handlers.get("tool_call")?.(enabled, ctx), undefined);
 		assert.equal(reviewCalls, 1);
 		assert.equal(Object.isFrozen(enabled.input), true);
+		assert.equal(statuses.length, 0);
 
 		await command.handler("bypass", ctx);
 		await handlers.get("session_start")?.({}, ctx);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · ready",
-		]);
+		assert.equal(statuses.length, 0);
 		assert.deepEqual(widgets.at(-1), [
 			"approval-guardian-bypass",
 			undefined,
@@ -1064,6 +1105,7 @@ test("temporarily bypasses reviews with a persistent UI-only warning", async () 
 		assert.equal(await handlers.get("tool_call")?.(reset, ctx), undefined);
 		assert.equal(reviewCalls, 2);
 		assert.equal(Object.isFrozen(reset.input), true);
+		assert.equal(statuses.length, 0);
 
 		const waitsBeforeUnsupportedModes = waitForIdleCalls;
 		for (const unsupportedMode of ["rpc", "json", "print"]) {
@@ -1074,10 +1116,7 @@ test("temporarily bypasses reviews with a persistent UI-only warning", async () 
 			);
 		}
 		assert.equal(waitForIdleCalls, waitsBeforeUnsupportedModes);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · ready",
-		]);
+		assert.equal(statuses.length, 0);
 	} finally {
 		ReviewerSessionController.prototype.review = originalReview;
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -1163,10 +1202,7 @@ test("warns and continues when configuration entries are unsupported", async () 
 
 	try {
 		await handlers.get("session_start")?.({}, ctx);
-		assert.deepEqual(statuses.at(-1), [
-			"approval-guardian",
-			"Guardian · ready · config warnings",
-		]);
+		assert.equal(statuses.length, 0);
 		assert.match(notices.join("\n"), /Invalid entries were ignored/);
 		assert.match(notices.join("\n"), /review\.powershell\.command/);
 		assert.match(notices.join("\n"), /review\.pwsh-start-job\.command/);
@@ -1179,6 +1215,7 @@ test("warns and continues when configuration entries are unsupported", async () 
 		assert.equal(notices.length, 0, "the same warning should not repeat per tool call");
 
 		await commands.get("approval-guardian")?.handler("", ctx);
+		assert.equal(statuses.length, 0);
 		assert.match(notices.join("\n"), /Approval Guardian · ready · config warnings/);
 		assert.match(notices.join("\n"), /invalid entries ignored/);
 		assert.match(notices.join("\n"), /Primary: .* · ready/);
