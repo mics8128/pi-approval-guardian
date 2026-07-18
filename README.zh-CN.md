@@ -1,6 +1,6 @@
 # pi-approval-guardian
 
-**为 Pi 工具调用提供 fail-closed 自动审查。**
+**为 Pi 工具调用提供默认 fail-closed 的自动审查。**
 
 Agent 执行 shell、读取私密数据，或修改项目外／敏感文件前，会先交给隔离 reviewer model 评估。
 
@@ -63,7 +63,7 @@ Pi agent tool call
         执行       阻止
 ```
 
-只有有效的 `outcome: "allow"` 才执行。Deny、timeout、无效输出、auth/model/provider failure、取消和 circuit open 全部 fail closed。
+Guardian 启用时，受保护动作只有在 reviewer 返回有效的 `outcome: "allow"` 后才会执行。Deny、timeout、无效输出、auth/model/provider failure、取消和 circuit open 全部 fail closed。
 
 私密数据还要求 user transcript 中已有明确授权，并且 reviewer 返回 `user_authorization: "high"`。
 
@@ -141,9 +141,29 @@ off < private-only < outside-or-private < always
 
 Primary model、fallback model 与 timeout precedence：`environment > trusted project > global > built-in default`。Policy 会合并 global、trusted project 和 environment 配置。
 
-格式错误或不支持的配置只会显示 UI 警告并被忽略；其余有效配置与内置默认值仍会生效，因此配置 typo 不会全局阻塞工具。受保护动作如果没有取得 reviewer 的有效 allow，仍会 fail closed。
+格式错误或不支持的配置只会显示 UI 警告并被忽略；其余有效配置与内置默认值仍会生效，因此配置 typo 不会全局阻塞工具。未启用临时 bypass 时，受保护动作如果没有取得 reviewer 的有效 allow，仍会 fail closed。
 
 运行 `/approval-guardian` 可查看 primary、配置 fallback、current-model fallback 的 readiness 与有效配置来源；`/approval-guardian rules` 可查看生效规则。
+
+### 临时 bypass
+
+确定要在当前 Pi runtime 中短暂关闭审查时，运行：
+
+```text
+/approval-guardian bypass
+```
+
+footer 会持续显示 `Guardian · BYPASSED`，editor 下方也会保留单行警告，因此即使其他 extension 替换 footer，警告仍会显示。停用期间，受保护的 agent tool call 会跳过 Guardian 分类、reviewer 推理、已批准 input 锁定和 circuit enforcement；其他 extension 或 tool 内部检查仍然有效。恢复保护：
+
+```text
+/approval-guardian enable
+```
+
+命令会等待当前 agent run 完全结束后再切换状态；不会放行或重试之前已经阻塞的 call，不会自动触发新的 agent turn，也不代表授予 agent 额外权限。bypass 只保存在内存中，遇到 `/reload`、`/new`、`/resume`、`/fork` 或 process 重启就会自动清除。只有交互式 TUI mode 能够启用；RPC、JSON 和 print mode 因无法保证持续显示警告而会拒绝。
+
+bypass／enable 通知仅显示在 UI。Guardian 刻意不把该控制状态注入 agent context：持久的“已 bypass”消息可能在重新启用后变成过期信息，也可能被误解为工作授权。要让 agent 执行什么，仍应另行给出明确指令。
+
+这会移除一层重要安全边界，只应在明确且短暂的时间窗口内使用。
 
 ## 更新与移除
 
@@ -179,7 +199,8 @@ pi remove -l npm:pi-approval-guardian
 - allow 后 Guardian 会验证并锁定 JSON-like tool input，避免后续 `tool_call` handler 改写；exotic runtime value 会 fail closed。它无法观察 commandPrefix、spawnHook、custom tool 内部行为或 dispatch 后的 filesystem 变化。
 - Pathless 或 nested-path custom tools、MCP、network、browser、email、deployment 和 subagent 动作不会自动全部受保护，必须有专门 enforcement。
 - Filesystem 状态可能在审查和执行之间发生变化。
-- Primary、配置 fallback 和不同的 current-model fallback 都不可用时，受保护动作会 fail closed。
+- Guardian 启用时，Primary、配置 fallback 和不同的 current-model fallback 都不可用会使受保护动作 fail closed。
+- 用户启用临时 bypass 后，Guardian review、input lock 和 circuit enforcement 会被刻意停用，直到重新启用或自动重置。
 
 完整技术说明见 [docs/REFERENCE.md](docs/REFERENCE.md)。
 

@@ -78,11 +78,28 @@ Policy composition:
 default policy + global policy + trusted-project policy + environment policy
 ```
 
-Malformed primary/fallback model, timeout, policy, review container, review level, unknown top-level key, or unsupported review-rule key produces a UI warning. Invalid fields and rules are ignored while the remaining valid configuration stays active; for primary model, fallback model, and timeout, precedence continues to the next valid source and then the built-in default. A malformed or unreadable config file is ignored as a unit. Configuration warnings do not globally block agent `tool_call` execution. Review rules allow the documented built-in keys and arbitrary custom `<tool>.path` keys; other parameter names cannot be consumed at runtime. Model IDs may contain additional slashes after the provider separator. Covered actions still fail closed when no reviewer returns a valid allow decision.
+Malformed primary/fallback model, timeout, policy, review container, review level, unknown top-level key, or unsupported review-rule key produces a UI warning. Invalid fields and rules are ignored while the remaining valid configuration stays active; for primary model, fallback model, and timeout, precedence continues to the next valid source and then the built-in default. A malformed or unreadable config file is ignored as a unit. Configuration warnings do not globally block agent `tool_call` execution. Review rules allow the documented built-in keys and arbitrary custom `<tool>.path` keys; other parameter names cannot be consumed at runtime. Model IDs may contain additional slashes after the provider separator. While temporary bypass is inactive, covered actions still fail closed when no reviewer returns a valid allow decision.
 
 Reviewer channels are tried in this order after deduplicating equivalent model identities: configured primary, configured `fallbackModel`, then the current Pi session model as the final fallback. `fallbackModel` defaults to `openai-codex/codex-auto-review`. Guardian advances only when the prior channel is missing, lacks usable authentication, or returns an explicit failure. A timeout is terminal for the action and blocks fail-closed without trying another channel. An explicit allow, deny, or cancellation also stops the chain immediately. Each distinct reviewer channel that is reached receives the configured deadline and its own retry budget. The current model is used only as the model identity for a new isolated reviewer session; Guardian never reuses the main conversation session as reviewer state. Channel switches emit UI-only warnings and are not injected into agent context.
 
-`/approval-guardian` reports the primary, configured fallback, current-model fallback, timeout, policy sources, and config-file state. It resolves usable request authentication but does not send a reviewer inference. Startup health performs only the faster configured-auth check, including degraded and active-fallback status.
+`/approval-guardian` reports the primary, configured fallback, current-model fallback, timeout, policy sources, config-file state, and temporary-bypass state. It resolves usable request authentication but does not send a reviewer inference. Startup health performs only the faster configured-auth check, including degraded and active-fallback status.
+
+## Temporary runtime bypass
+
+`/approval-guardian bypass` enables an explicit, in-memory bypass after waiting for the current agent run and queued continuations to settle. `/approval-guardian enable` ends it. Both commands are idempotent. Activation is restricted to interactive TUI mode; RPC, JSON, and print modes are refused because their clients can ignore or fail to retain fire-and-forget status updates, so a persistent warning cannot be guaranteed.
+
+While bypass is active:
+
+- the footer status remains `Guardian · BYPASSED`, and a persistent one-line `belowEditor` widget remains visible even when another extension replaces the footer; toggle/status notifications are UI-only;
+- the `tool_call` hook returns before batch lookup, configuration loading, classification, reviewer inference, deterministic allow checks, approved-input locking, and circuit enforcement;
+- no per-action Guardian allow/block notification is emitted because the action was not reviewed;
+- other extensions and tool-internal checks remain active; bypass disables only Approval Guardian's hook;
+- cached reviewer controllers are disposed and circuit/batch state is reset across each mode transition;
+- `/approval-guardian` reports `reviews disabled` plus the underlying reviewer readiness, without claiming that current execution is fail-closed.
+
+The bypass does not release or retry an already blocked/in-flight tool call, trigger an agent turn, or grant task authorization. It is not persisted to the session file and resets on every `session_start` lifecycle, including startup/reload/new/resume/fork, as well as process restart.
+
+Guardian intentionally does not inject bypass or re-enable state into agent messages, the system prompt, or other model context. A one-shot persisted “bypassed” message could remain stale after re-enabling and could be misread as permission; the user must separately instruct the agent what work to perform. The persistent footer status plus below-editor widget are the user-facing safety signals.
 
 ## Private-read classification
 
@@ -129,7 +146,7 @@ User skill, agent, extension, and installed-package source is not private solely
 
 ## Broad search handling
 
-`grep` defaults to `always` because a broad or omitted path can recursively search private descendants.
+`grep` defaults to `outside-or-private`: ordinary clean in-project searches bypass reviewer latency, while a broad or omitted path is still reviewed when its effective scope can reach private descendants.
 
 The classifier checks:
 
@@ -177,7 +194,7 @@ Transcript, tool output, file content, retry reasons, and planned actions are fr
 
 ## Authorization contract
 
-A covered action executes only when the reviewer returns a valid assessment with `outcome: "allow"`. Before allowing execution, Guardian validates the input as JSON-like data, deeply freezes it, and makes `event.input` non-writable/non-configurable, so later `tool_call` handlers cannot replace or mutate approved arguments. Exotic runtime values such as typed arrays, `Map`, `Set`, accessors, symbol-keyed properties, sparse arrays, or arrays with custom prototypes/properties fail closed instead of receiving a misleading lock guarantee. Extensions that need to rewrite a covered action must run before Guardian; they cannot rely on post-approval rewriting.
+When temporary bypass is inactive, a covered action executes only when the reviewer returns a valid assessment with `outcome: "allow"`. Before allowing execution, Guardian validates the input as JSON-like data, deeply freezes it, and makes `event.input` non-writable/non-configurable, so later `tool_call` handlers cannot replace or mutate approved arguments. Exotic runtime values such as typed arrays, `Map`, `Set`, accessors, symbol-keyed properties, sparse arrays, or arrays with custom prototypes/properties fail closed instead of receiving a misleading lock guarantee. Extensions that need to rewrite a covered action must run before Guardian; they cannot rely on post-approval rewriting.
 
 Additional deterministic requirements:
 
@@ -268,4 +285,5 @@ When the circuit opens, the current run is aborted and later covered actions are
 - Guardian locks approved `event.input` against later `tool_call` handlers, but cannot observe command prefixes, spawn hooks, or a custom tool's internal behavior after dispatch.
 - Filesystem state may change between classification and execution.
 - Reviewer decisions are probabilistic.
-- At least one distinct reviewer channel must be available; failure of the configured primary, configured fallback, and current-model fallback blocks covered actions.
+- A user-enabled temporary bypass intentionally removes Guardian classification, review, input locking, and circuit enforcement until it is re-enabled or automatically reset.
+- While Guardian is enabled, at least one distinct reviewer channel must be available; failure of the configured primary, configured fallback, and current-model fallback blocks covered actions.

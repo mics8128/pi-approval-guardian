@@ -1,6 +1,6 @@
 # pi-approval-guardian
 
-**為 Pi 工具呼叫提供 fail-closed 自動審核。**
+**為 Pi 工具呼叫提供預設 fail-closed 的自動審核。**
 
 Agent 執行 shell、讀取私密資料，或修改專案外／敏感檔案前，會先交由隔離 reviewer model 評估。
 
@@ -63,7 +63,7 @@ Pi agent tool call
         執行       阻擋
 ```
 
-只有有效的 `outcome: "allow"` 才會執行。Deny、timeout、錯誤輸出、auth/model/provider failure、取消與 circuit open 都會 fail closed。
+Guardian 啟用時，受保護動作只有在 reviewer 回傳有效的 `outcome: "allow"` 後才會執行。Deny、timeout、錯誤輸出、auth/model/provider failure、取消與 circuit open 都會 fail closed。
 
 私密資料還必須在 user transcript 中已有明確授權，且 reviewer 回傳 `user_authorization: "high"`。
 
@@ -158,9 +158,29 @@ PI_APPROVAL_GUARDIAN_POLICY
 
 Primary model、fallback model 與 timeout precedence：`environment > trusted project > global > built-in default`。Policy 會合併 global、trusted project 與 environment 設定。
 
-格式錯誤或不支援的設定只會顯示 UI 警告並被忽略；其餘有效設定與內建預設仍會生效，因此設定 typo 不會全域阻擋工具。受保護動作若未取得 reviewer 的有效 allow，仍然會 fail closed。
+格式錯誤或不支援的設定只會顯示 UI 警告並被忽略；其餘有效設定與內建預設仍會生效，因此設定 typo 不會全域阻擋工具。未啟用暫時 bypass 時，受保護動作若未取得 reviewer 的有效 allow，仍然會 fail closed。
 
 執行 `/approval-guardian` 可查看 primary、設定 fallback、current-model fallback 的 readiness 與有效設定來源；`/approval-guardian rules` 可查看生效中的規則。
+
+### 暫時 bypass
+
+確定要在目前 Pi 執行階段短暫停用審核時，執行：
+
+```text
+/approval-guardian bypass
+```
+
+footer 會持續顯示 `Guardian · BYPASSED`，editor 下方也會保留單行警告，因此其他 extension 即使替換 footer，警告仍會顯示。停用期間，受保護的 agent tool call 會略過 Guardian 分類、reviewer 推論、核准 input 鎖定與 circuit enforcement；其他 extension 或 tool 內部檢查仍然有效。要恢復保護，執行：
+
+```text
+/approval-guardian enable
+```
+
+指令會等待目前 agent run 完全結束後再切換狀態；不會放行或重試先前已阻擋的 call、不會自行觸發新的 agent turn，也不代表授予 agent 額外權限。bypass 只保存在記憶體中，遇到 `/reload`、`/new`、`/resume`、`/fork` 或 process 重啟就會自動清除。只有互動式 TUI mode 能啟用；RPC、JSON 與 print mode 因無法保證持續顯示警告而會拒絕。
+
+bypass／enable 通知只顯示於 UI。Guardian 刻意不把這個控制狀態注入 agent context：持久的「已 bypass」訊息可能在重新啟用後變成過期資訊，也可能被誤解為工作授權。要 agent 執行什麼，仍應另外下達明確指令。
+
+這會移除一層重要安全邊界，只應在明確且短暫的時間窗使用。
 
 ## 更新與移除
 
@@ -196,7 +216,8 @@ pi remove -l npm:pi-approval-guardian
 - allow 後 Guardian 會驗證並鎖定 JSON-like tool input，避免後續 `tool_call` handler 改寫；exotic runtime value 會 fail closed。它無法觀察 commandPrefix、spawnHook、custom tool 內部行為或 dispatch 後的 filesystem 變化。
 - Pathless 或 nested-path custom tools、MCP、network、browser、email、deployment 與 subagent 動作不會自動全部受保護，必須有專屬 enforcement。
 - Filesystem 狀態可能在審核與執行之間改變。
-- Primary、設定 fallback 與不同的 current-model fallback 都不可用時，受保護動作會 fail closed。
+- Guardian 啟用時，Primary、設定 fallback 與不同的 current-model fallback 都不可用會讓受保護動作 fail closed。
+- 使用者啟用暫時 bypass 後，Guardian review、input lock 與 circuit enforcement 會刻意停用，直到重新啟用或自動重設。
 - Pi project trust、OS/container sandbox 與本套件解決的是不同安全層。
 
 完整技術行為請參閱 [docs/REFERENCE.md](docs/REFERENCE.md)。

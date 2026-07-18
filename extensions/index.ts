@@ -349,8 +349,13 @@ function freezeJsonLike(value: unknown, seen = new WeakSet<object>()): void {
 // Extension wiring intentionally coordinates lifecycle, UI, policy, and reviewer state.
 // pi-lens-ignore: high-complexity, high-fan-out
 export default function approvalGuardian(pi: ExtensionAPI) {
+	type GuardianCommandContext = Parameters<
+		Parameters<typeof pi.registerCommand>[1]["handler"]
+	>[1];
+
 	let activeReviews = 0;
 	let idleStatus: string | undefined;
+	let temporaryBypassActive = false;
 	let configurationWarningsActive = false;
 	let configurationWarningKey: string | undefined;
 	const reviewerSwitchNoticeKeys = new Set<string>();
@@ -359,22 +364,55 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	const circuitBreaker = new DenialCircuitBreaker();
 	const reviewBatches = new ReviewBatchTracker();
 
-	const displayedIdleStatus = (): string | undefined =>
-		idleStatus && configurationWarningsActive
-			? `${idleStatus} · config warnings`
-			: idleStatus;
+	const bypassStatus = (ctx: ExtensionContext): string =>
+		ctx.ui.theme.fg("warning", "Guardian · BYPASSED");
 
-	const refreshIdleStatus = (ctx: ExtensionContext) => {
-		if (activeReviews === 0 && idleStatus !== undefined) {
-			ctx.ui.setStatus("approval-guardian", displayedIdleStatus());
-		}
+	const showBypassWarning = (ctx: ExtensionContext) => {
+		ctx.ui.setWidget(
+			"approval-guardian-bypass",
+			[
+				ctx.ui.theme.fg(
+					"warning",
+					"⚠ Approval Guardian is BYPASSED — run /approval-guardian enable",
+				),
+			],
+			{ placement: "belowEditor" },
+		);
+		ctx.ui.setStatus("approval-guardian", bypassStatus(ctx));
 	};
 
-	const resetRuntime = () => {
+	const clearBypassWarning = (ctx: ExtensionContext) => {
+		ctx.ui.setWidget("approval-guardian-bypass", undefined);
+	};
+
+	const displayedIdleStatus = (
+		ctx: ExtensionContext,
+	): string | undefined => {
+		if (temporaryBypassActive) return bypassStatus(ctx);
+		return idleStatus && configurationWarningsActive
+			? `${idleStatus} · config warnings`
+			: idleStatus;
+	};
+
+	const refreshIdleStatus = (ctx: ExtensionContext) => {
+		if (activeReviews !== 0) return;
+		if (temporaryBypassActive) {
+			showBypassWarning(ctx);
+			return;
+		}
+		ctx.ui.setStatus("approval-guardian", displayedIdleStatus(ctx));
+	};
+
+	const disposeReviewerControllers = () => {
 		for (const controller of controllers.values()) controller.dispose();
 		controllers.clear();
 		controllerContextKey = undefined;
+	};
+
+	const resetRuntime = () => {
+		disposeReviewerControllers();
 		idleStatus = undefined;
+		temporaryBypassActive = false;
 		configurationWarningsActive = false;
 		configurationWarningKey = undefined;
 		reviewerSwitchNoticeKeys.clear();
@@ -439,9 +477,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		if (adverse !== undefined && circuitBreaker.record(adverse)) ctx.abort();
 	};
 
-	pi.on("session_start", (_event, ctx) => {
-		resetRuntime();
-		activeReviews = 0;
+	const syncRuntimeHealth = (ctx: ExtensionContext) => {
 		const config = loadGuardianConfig({
 			cwd: ctx.cwd,
 			projectTrusted: ctx.isProjectTrusted(),
@@ -471,21 +507,32 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		if (!health.selectedFallback && health.reason) {
 			ctx.ui.notify(health.reason, "warning");
 		}
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		const wasBypassed = temporaryBypassActive;
+		resetRuntime();
+		activeReviews = 0;
+		if (wasBypassed) clearBypassWarning(ctx);
+		syncRuntimeHealth(ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		resetRuntime();
 		activeReviews = 0;
 		idleStatus = undefined;
+		clearBypassWarning(ctx);
 		ctx.ui.setStatus("approval-guardian", undefined);
 	});
 	pi.on("before_agent_start", () => {
+		// Temporary bypass is intentionally UI/control-plane state only. Do not
+		// inject it into model context or treat it as additional authorization.
 		circuitBreaker.reset();
 		reviewBatches.reset();
 	});
 
 	const showConfiguration = async (
 		args: string,
-		ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
+		ctx: GuardianCommandContext,
 	): Promise<void> => {
 		const projectTrusted = ctx.isProjectTrusted();
 		const config = loadGuardianConfig({ cwd: ctx.cwd, projectTrusted });
@@ -556,10 +603,11 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 					: degradedFallback
 						? "ready · fallback unavailable"
 						: "ready";
-		const statusLabel =
-			config.warnings.length > 0
-				? `${operationalStatusLabel} · config warnings`
-				: operationalStatusLabel;
+		const statusLabel = `${
+			temporaryBypassActive
+				? `BYPASSED · underlying ${operationalStatusLabel}`
+				: operationalStatusLabel
+		}${config.warnings.length > 0 ? " · config warnings" : ""}`;
 		const channelStatus = (channelIssue: string | undefined) =>
 			channelIssue ? "unavailable" : "ready";
 		const primaryIdentity = reviewerChannelIdentity(primaryChannel);
@@ -586,7 +634,16 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				? "present · trusted"
 				: "present · skipped (project untrusted)";
 		if (selectedChannel && selectedIndex > 0) {
-			notifyReviewerSwitch(ctx, channels[selectedIndex - 1], selectedChannel);
+			if (temporaryBypassActive) {
+				setIdleStatus(
+					ctx,
+					selectedChannel.role === "current-model"
+						? "Guardian · current-model fallback"
+						: "Guardian · fallback",
+				);
+			} else {
+				notifyReviewerSwitch(ctx, channels[selectedIndex - 1], selectedChannel);
+			}
 		} else {
 			setIdleStatus(
 				ctx,
@@ -626,7 +683,10 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			: [];
 		ctx.ui.notify(
 			[
-				`Approval Guardian · ${statusLabel} · fail-closed`,
+				`Approval Guardian · ${statusLabel} · ${temporaryBypassActive ? "reviews disabled" : "fail-closed"}`,
+				temporaryBypassActive
+					? "Temporary bypass: active; covered agent tool calls are not being reviewed. Run /approval-guardian enable to restore protection."
+					: "Temporary bypass: inactive",
 				`Primary: ${config.model} (${config.modelSource}) · ${channelStatus(issues.get(primaryIdentity))}`,
 				`Configured fallback: ${config.fallbackModel} (${config.fallbackModelSource}) · ${configuredFallbackStatus}`,
 				`Current-model fallback: ${currentChannel?.modelSpec ?? "unavailable"} · ${currentFallbackStatus}`,
@@ -643,28 +703,109 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				...config.warnings.map((warning) => `Configuration warning: ${warning}`),
 				...(issue ? [issue] : []),
 			].join("\n"),
-			ready && !degradedFallback && config.warnings.length === 0
-				? "info"
-				: "warning",
+			temporaryBypassActive ||
+			!ready ||
+			degradedFallback ||
+			config.warnings.length > 0
+				? "warning"
+				: "info",
 		);
 	};
 
+	const setTemporaryBypass = async (
+		nextActive: boolean,
+		ctx: GuardianCommandContext,
+	): Promise<void> => {
+		if (nextActive && ctx.mode !== "tui") {
+			throw new Error(
+				"Temporary Approval Guardian bypass requires interactive TUI mode so the persistent warning remains visible.",
+			);
+		}
+		await ctx.waitForIdle();
+		if (temporaryBypassActive === nextActive) {
+			if (!nextActive) clearBypassWarning(ctx);
+			refreshIdleStatus(ctx);
+			ctx.ui.notify(
+				nextActive
+					? "Approval Guardian is already temporarily bypassed. Run /approval-guardian enable to restore protection."
+					: "Approval Guardian is already enabled.",
+				nextActive ? "warning" : "info",
+			);
+			return;
+		}
+
+		disposeReviewerControllers();
+		reviewerSwitchNoticeKeys.clear();
+		circuitBreaker.reset();
+		reviewBatches.reset();
+		if (nextActive) {
+			showBypassWarning(ctx);
+			temporaryBypassActive = true;
+			ctx.ui.notify(
+				[
+					"Approval Guardian is temporarily BYPASSED.",
+					"Covered agent tool calls will proceed without Guardian review until /approval-guardian enable.",
+					"This does not grant the agent additional authorization, and the bypass resets automatically when the Pi session runtime reloads or is replaced.",
+				].join("\n"),
+				"warning",
+			);
+			return;
+		}
+
+		temporaryBypassActive = false;
+		clearBypassWarning(ctx);
+		refreshIdleStatus(ctx);
+		syncRuntimeHealth(ctx);
+		ctx.ui.notify(
+			"Approval Guardian is enabled again. Covered agent tool calls once again require Guardian review.",
+			"info",
+		);
+	};
+
+	const commandArguments = [
+		{
+			value: "rules",
+			label: "rules",
+			description: "Show review levels",
+		},
+		{
+			value: "bypass",
+			label: "bypass",
+			description: "Temporarily disable Guardian review",
+		},
+		{
+			value: "enable",
+			label: "enable",
+			description: "End the temporary bypass",
+		},
+	];
+
 	pi.registerCommand("approval-guardian", {
-		description: "Show Guardian status or the tool/parameter review rules",
-		getArgumentCompletions: (prefix) =>
-			"rules".startsWith(prefix)
-				? [
-						{
-							value: "rules",
-							label: "rules",
-							description: "Show review levels",
-						},
-					]
-				: null,
-		handler: showConfiguration,
+		description:
+			"Show Guardian status/rules or temporarily bypass/enable review",
+		getArgumentCompletions: (prefix) => {
+			const normalized = prefix.trim().toLowerCase();
+			const matches = commandArguments.filter(({ value }) =>
+				value.startsWith(normalized),
+			);
+			return matches.length > 0 ? matches : null;
+		},
+		handler: async (args, ctx) => {
+			switch (args.trim().toLowerCase()) {
+				case "bypass":
+					await setTemporaryBypass(true, ctx);
+					return;
+				case "enable":
+					await setTemporaryBypass(false, ctx);
+					return;
+				default:
+					await showConfiguration(args, ctx);
+			}
+		},
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
+		if (temporaryBypassActive) return;
 		const batch = toolCallBatchInfo(
 			event.toolCallId,
 			ctx.sessionManager.getBranch(),
@@ -716,6 +857,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
+		if (temporaryBypassActive) return;
 		const batch = toolCallBatchInfo(
 			event.toolCallId,
 			ctx.sessionManager.getBranch(),
@@ -786,7 +928,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			activeReviews--;
 			ctx.ui.setStatus(
 				"approval-guardian",
-				activeReviews > 0 ? reviewStatus(activeReviews) : displayedIdleStatus(),
+				activeReviews > 0 ? reviewStatus(activeReviews) : displayedIdleStatus(ctx),
 			);
 		}
 	}

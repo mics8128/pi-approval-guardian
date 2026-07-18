@@ -1,6 +1,6 @@
 # pi-approval-guardian
 
-**Revisión automática fail-closed para llamadas de herramientas de Pi.**
+**Revisión automática fail-closed por defecto para llamadas de herramientas de Pi.**
 
 Antes de ejecutar comandos shell, leer datos privados o modificar archivos sensibles/fuera del proyecto, un modelo reviewer aislado evalúa la acción.
 
@@ -63,7 +63,7 @@ Pi agent tool call
         ejecutar   bloquear
 ```
 
-Solo un `outcome: "allow"` válido permite ejecutar. Deny, timeout, output inválido, errores de auth/model/provider, cancelación y circuit open bloquean fail-closed.
+Mientras Guardian está habilitado, una acción protegida solo se ejecuta con un `outcome: "allow"` válido del reviewer. Deny, timeout, output inválido, errores de auth/model/provider, cancelación y circuit open bloquean fail-closed.
 
 El acceso a datos privados también exige autorización explícita en el transcript del usuario y `user_authorization: "high"` del reviewer.
 
@@ -141,9 +141,29 @@ Variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_FALLBACK_MODEL`, 
 
 Precedencia de primary model/fallback model/timeout: `environment > trusted project > global > built-in default`. La policy combina configuración global, trusted project y environment.
 
-Los ajustes malformed o unsupported muestran una advertencia en la UI y se ignoran; los ajustes válidos restantes y los built-in defaults siguen activos, por lo que un typo de configuración no bloquea globalmente las tools. Las acciones protegidas siguen fallando closed salvo que un reviewer devuelva un allow válido.
+Los ajustes malformed o unsupported muestran una advertencia en la UI y se ignoran; los ajustes válidos restantes y los built-in defaults siguen activos, por lo que un typo de configuración no bloquea globalmente las tools. Mientras el bypass temporal está inactivo, las acciones protegidas siguen fallando closed salvo que un reviewer devuelva un allow válido.
 
 Usa `/approval-guardian` para ver primary, configured fallback, current-model fallback y las fuentes de configuración; `/approval-guardian rules` muestra las reglas efectivas.
+
+### Bypass temporal
+
+Cuando necesites suspender intencionalmente la revisión durante el runtime actual de Pi:
+
+```text
+/approval-guardian bypass
+```
+
+El footer muestra continuamente `Guardian · BYPASSED` y una advertencia de una línea permanece debajo del editor, incluso si otra extensión sustituye el footer. Durante el bypass, las llamadas protegidas del agent omiten la clasificación de Guardian, la inferencia del reviewer, el bloqueo del input aprobado y el circuit enforcement; otras extensiones y comprobaciones internas de las tools siguen activas. Para restaurar la protección:
+
+```text
+/approval-guardian enable
+```
+
+El comando espera a que termine por completo el agent run activo antes de cambiar el estado. No libera ni reintenta una llamada ya bloqueada, no inicia un nuevo agent turn y no concede autorización adicional al agent. El bypass solo vive en memoria y se restablece con `/reload`, `/new`, `/resume`, `/fork` o al reiniciar el proceso. Solo puede activarse en el modo TUI interactivo; RPC, JSON y print lo rechazan porque no pueden garantizar una advertencia persistente.
+
+Las notificaciones de bypass/enable son solo para la UI. Guardian no inyecta deliberadamente este estado de control en el contexto del agent: un mensaje persistente de “bypassed” podría quedar obsoleto después de reactivar la protección o interpretarse como permiso. Da al agent una instrucción separada y explícita sobre el trabajo que quieres realizar.
+
+Esto elimina una barrera de seguridad importante; úsalo solo durante una ventana breve e intencional.
 
 ## Actualizar y eliminar
 
@@ -179,7 +199,8 @@ Un npm spec con versión queda fijado. Para mover el pin, instala una nueva vers
 - Tras allow, Guardian valida y bloquea el tool input JSON-like para impedir cambios de handlers `tool_call` posteriores; los runtime values exóticos fallan closed. No observa commandPrefix, spawnHook, custom-tool internals ni cambios del filesystem después de dispatch.
 - Pathless o nested-path custom tools, MCP, network, browser, email, deployment y subagent actions no quedan cubiertas automáticamente; necesitan dedicated enforcement.
 - El estado del filesystem puede cambiar entre review y ejecución.
-- Si primary, configured fallback y un current-model fallback distinto no están disponibles, las acciones protegidas se bloquean fail-closed.
+- Mientras Guardian está habilitado, si primary, configured fallback y un current-model fallback distinto no están disponibles, las acciones protegidas se bloquean fail-closed.
+- Un bypass temporal activado por el usuario desactiva intencionalmente Guardian review, input locking y circuit enforcement hasta reactivarlo o restablecerlo automáticamente.
 
 Referencia técnica completa: [docs/REFERENCE.md](docs/REFERENCE.md)
 
