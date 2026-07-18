@@ -62,6 +62,8 @@ export interface ReviewerSessionOptions {
 export class ReviewerSessionController {
 	// pi-lens-ignore: large-class
 	private session?: AgentSession;
+	private sessionStartup?: Promise<AgentSession>;
+	private sessionEpoch = 0;
 	private cursor = 0;
 	private deliveredPrefix = "";
 	private disposed = false;
@@ -294,6 +296,32 @@ export class ReviewerSessionController {
 	private async getSession(): Promise<AgentSession> {
 		if (this.session) return this.session;
 		if (this.disposed) throw new Error("reviewer controller is disposed");
+		if (this.sessionStartup) return this.sessionStartup;
+		const epoch = this.sessionEpoch;
+		const startup = this.createSession(epoch);
+		this.sessionStartup = startup;
+		try {
+			return await startup;
+		} finally {
+			if (this.sessionStartup === startup) this.sessionStartup = undefined;
+		}
+	}
+
+	private async createSession(epoch: number): Promise<AgentSession> {
+		const session = await this.instantiateSession();
+		if (this.disposed || epoch !== this.sessionEpoch) {
+			session.dispose();
+			throw new Error(
+				this.disposed
+					? "reviewer controller was disposed during startup"
+					: "reviewer session startup was superseded",
+			);
+		}
+		this.session = session;
+		return session;
+	}
+
+	private async instantiateSession(): Promise<AgentSession> {
 		const settingsManager = SettingsManager.inMemory({
 			compaction: { enabled: false },
 			retry: { enabled: false },
@@ -337,15 +365,12 @@ export class ReviewerSessionController {
 		const created = await createAgentSession(
 			sessionOptions as Parameters<typeof createAgentSession>[0],
 		);
-		if (this.disposed) {
-			created.session.dispose();
-			throw new Error("reviewer controller was disposed during startup");
-		}
-		this.session = created.session;
 		return created.session;
 	}
 
 	private resetSession(): void {
+		this.sessionEpoch++;
+		this.sessionStartup = undefined;
 		const session = this.session;
 		this.session = undefined;
 		session?.dispose();

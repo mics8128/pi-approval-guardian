@@ -153,7 +153,7 @@ Malformed 또는 unsupported 설정은 UI warning을 표시한 뒤 무시되며,
 /approval-guardian bypass
 ```
 
-footer에 `Guardian · BYPASSED`가 계속 표시되고 editor 아래에도 one-line warning이 유지되므로 다른 extension이 footer를 교체해도 경고가 보입니다. bypass 중 protected agent tool call은 Guardian classification, reviewer inference, approved-input lock, circuit enforcement를 건너뛰지만 other extension과 tool-internal check는 계속 적용됩니다. Protection을 복구하려면:
+bypass가 활성화된 동안 editor 아래에 한 줄 warning이 계속 표시됩니다. bypass 중 protected agent tool call은 Guardian classification, reviewer inference, approved-input lock, circuit enforcement를 건너뛰지만 other extension과 tool-internal check는 계속 적용됩니다. Protection을 복구하려면:
 
 ```text
 /approval-guardian enable

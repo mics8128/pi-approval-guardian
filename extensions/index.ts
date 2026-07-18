@@ -1,5 +1,4 @@
 // pi-lens-ignore: find-import-file-without-extension
-import { homedir } from "node:os";
 import {
 	isToolCallEventType,
 	type ExtensionAPI,
@@ -33,6 +32,10 @@ import {
 	resolveReviewerModel,
 	type ReviewerModel,
 } from "../src/reviewer-session.ts";
+import {
+	commandReferencesPrivateData,
+	looksLikePrivateGlob,
+} from "../src/shell-private-data.ts";
 
 type ReviewerChannelRole =
 	| "primary"
@@ -353,19 +356,13 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		Parameters<typeof pi.registerCommand>[1]["handler"]
 	>[1];
 
-	let activeReviews = 0;
-	let idleStatus: string | undefined;
 	let temporaryBypassActive = false;
-	let configurationWarningsActive = false;
 	let configurationWarningKey: string | undefined;
 	const reviewerSwitchNoticeKeys = new Set<string>();
 	const controllers = new Map<string, ReviewerSessionController>();
 	let controllerContextKey: string | undefined;
 	const circuitBreaker = new DenialCircuitBreaker();
 	const reviewBatches = new ReviewBatchTracker();
-
-	const bypassStatus = (ctx: ExtensionContext): string =>
-		ctx.ui.theme.fg("warning", "Guardian · BYPASSED");
 
 	const showBypassWarning = (ctx: ExtensionContext) => {
 		ctx.ui.setWidget(
@@ -378,29 +375,10 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			],
 			{ placement: "belowEditor" },
 		);
-		ctx.ui.setStatus("approval-guardian", bypassStatus(ctx));
 	};
 
 	const clearBypassWarning = (ctx: ExtensionContext) => {
 		ctx.ui.setWidget("approval-guardian-bypass", undefined);
-	};
-
-	const displayedIdleStatus = (
-		ctx: ExtensionContext,
-	): string | undefined => {
-		if (temporaryBypassActive) return bypassStatus(ctx);
-		return idleStatus && configurationWarningsActive
-			? `${idleStatus} · config warnings`
-			: idleStatus;
-	};
-
-	const refreshIdleStatus = (ctx: ExtensionContext) => {
-		if (activeReviews !== 0) return;
-		if (temporaryBypassActive) {
-			showBypassWarning(ctx);
-			return;
-		}
-		ctx.ui.setStatus("approval-guardian", displayedIdleStatus(ctx));
 	};
 
 	const disposeReviewerControllers = () => {
@@ -411,18 +389,11 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 
 	const resetRuntime = () => {
 		disposeReviewerControllers();
-		idleStatus = undefined;
 		temporaryBypassActive = false;
-		configurationWarningsActive = false;
 		configurationWarningKey = undefined;
 		reviewerSwitchNoticeKeys.clear();
 		circuitBreaker.reset();
 		reviewBatches.reset();
-	};
-
-	const setIdleStatus = (ctx: ExtensionContext, status: string) => {
-		idleStatus = status;
-		refreshIdleStatus(ctx);
 	};
 
 	const syncConfigurationWarnings = (
@@ -430,11 +401,6 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		warnings: string[],
 	) => {
 		const nextKey = warnings.length > 0 ? warnings.join("\n") : undefined;
-		const nextActive = nextKey !== undefined;
-		if (configurationWarningsActive !== nextActive) {
-			configurationWarningsActive = nextActive;
-			refreshIdleStatus(ctx);
-		}
 		if (!nextKey) {
 			configurationWarningKey = undefined;
 			return;
@@ -455,12 +421,6 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		from: ReviewerChannel,
 		to: ReviewerChannel,
 	) => {
-		setIdleStatus(
-			ctx,
-			to.role === "current-model"
-				? "Guardian · current-model fallback"
-				: "Guardian · fallback",
-		);
 		const key = `${from.role}:${from.modelSpec}→${to.role}:${to.modelSpec}`;
 		if (reviewerSwitchNoticeKeys.has(key)) return;
 		reviewerSwitchNoticeKeys.add(key);
@@ -494,15 +454,6 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 				(channel) => channel.role === health.selectedFallback,
 			);
 			if (selected) notifyReviewerSwitch(ctx, channels[0], selected);
-		} else {
-			setIdleStatus(
-				ctx,
-				!health.ready
-					? "Guardian · needs attention"
-					: health.fallbackUnavailable
-						? "Guardian · ready · fallback unavailable"
-						: "Guardian · ready",
-			);
 		}
 		if (!health.selectedFallback && health.reason) {
 			ctx.ui.notify(health.reason, "warning");
@@ -512,16 +463,12 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		const wasBypassed = temporaryBypassActive;
 		resetRuntime();
-		activeReviews = 0;
 		if (wasBypassed) clearBypassWarning(ctx);
 		syncRuntimeHealth(ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		resetRuntime();
-		activeReviews = 0;
-		idleStatus = undefined;
 		clearBypassWarning(ctx);
-		ctx.ui.setStatus("approval-guardian", undefined);
 	});
 	pi.on("before_agent_start", () => {
 		// Temporary bypass is intentionally UI/control-plane state only. Do not
@@ -594,7 +541,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			channels
 				.slice(1)
 				.every((channel) => issues.get(reviewerChannelIdentity(channel)));
-		const operationalStatusLabel = !ready
+		const operationalLabel = !ready
 			? "needs attention"
 			: selectedChannel?.role === "current-model"
 				? "ready via current model"
@@ -603,10 +550,10 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 					: degradedFallback
 						? "ready · fallback unavailable"
 						: "ready";
-		const statusLabel = `${
+		const summaryLabel = `${
 			temporaryBypassActive
-				? `BYPASSED · underlying ${operationalStatusLabel}`
-				: operationalStatusLabel
+				? `BYPASSED · underlying ${operationalLabel}`
+				: operationalLabel
 		}${config.warnings.length > 0 ? " · config warnings" : ""}`;
 		const channelStatus = (channelIssue: string | undefined) =>
 			channelIssue ? "unavailable" : "ready";
@@ -633,26 +580,12 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			: projectTrusted
 				? "present · trusted"
 				: "present · skipped (project untrusted)";
-		if (selectedChannel && selectedIndex > 0) {
-			if (temporaryBypassActive) {
-				setIdleStatus(
-					ctx,
-					selectedChannel.role === "current-model"
-						? "Guardian · current-model fallback"
-						: "Guardian · fallback",
-				);
-			} else {
-				notifyReviewerSwitch(ctx, channels[selectedIndex - 1], selectedChannel);
-			}
-		} else {
-			setIdleStatus(
-				ctx,
-				!ready
-					? "Guardian · needs attention"
-					: degradedFallback
-						? "Guardian · ready · fallback unavailable"
-						: "Guardian · ready",
-			);
+		if (
+			selectedChannel &&
+			selectedIndex > 0 &&
+			!temporaryBypassActive
+		) {
+			notifyReviewerSwitch(ctx, channels[selectedIndex - 1], selectedChannel);
 		}
 		const details =
 			args.trim() === "rules"
@@ -683,7 +616,7 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			: [];
 		ctx.ui.notify(
 			[
-				`Approval Guardian · ${statusLabel} · ${temporaryBypassActive ? "reviews disabled" : "fail-closed"}`,
+				`Approval Guardian · ${summaryLabel} · ${temporaryBypassActive ? "reviews disabled" : "fail-closed"}`,
 				temporaryBypassActive
 					? "Temporary bypass: active; covered agent tool calls are not being reviewed. Run /approval-guardian enable to restore protection."
 					: "Temporary bypass: inactive",
@@ -723,8 +656,8 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		}
 		await ctx.waitForIdle();
 		if (temporaryBypassActive === nextActive) {
-			if (!nextActive) clearBypassWarning(ctx);
-			refreshIdleStatus(ctx);
+			if (nextActive) showBypassWarning(ctx);
+			else clearBypassWarning(ctx);
 			ctx.ui.notify(
 				nextActive
 					? "Approval Guardian is already temporarily bypassed. Run /approval-guardian enable to restore protection."
@@ -739,8 +672,8 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		circuitBreaker.reset();
 		reviewBatches.reset();
 		if (nextActive) {
-			showBypassWarning(ctx);
 			temporaryBypassActive = true;
+			showBypassWarning(ctx);
 			ctx.ui.notify(
 				[
 					"Approval Guardian is temporarily BYPASSED.",
@@ -754,7 +687,6 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 
 		temporaryBypassActive = false;
 		clearBypassWarning(ctx);
-		refreshIdleStatus(ctx);
 		syncRuntimeHealth(ctx);
 		ctx.ui.notify(
 			"Approval Guardian is enabled again. Covered agent tool calls once again require Guardian review.",
@@ -870,8 +802,6 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 		config: GuardianConfig,
 		ctx: ExtensionContext,
 	): Promise<GuardianReviewResult> {
-		activeReviews++;
-		ctx.ui.setStatus("approval-guardian", reviewStatus(activeReviews));
 		try {
 			const channels = buildReviewerChannels(
 				config,
@@ -896,13 +826,10 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 					"error",
 				);
 			}
-			if (result.kind === "failure" || result.kind === "timeout") {
-				idleStatus = "Guardian · needs attention";
-			} else if (!usedFallback && result.kind !== "cancelled") {
-				const health = guardianHealth(config, ctx.modelRegistry, ctx.model);
-				idleStatus = health.fallbackUnavailable
-					? "Guardian · ready · fallback unavailable"
-					: "Guardian · ready";
+			if (
+				!usedFallback &&
+				(result.kind === "allowed" || result.kind === "denied")
+			) {
 				reviewerSwitchNoticeKeys.clear();
 			}
 			if (usedFallback && result.kind === "failure") {
@@ -919,17 +846,10 @@ export default function approvalGuardian(pi: ExtensionAPI) {
 			}
 			return result;
 		} catch (error) {
-			idleStatus = "Guardian · needs attention";
 			return {
 				kind: "failure",
 				message: `Automatic approval review failed: ${error instanceof Error ? error.message : String(error)}`,
 			};
-		} finally {
-			activeReviews--;
-			ctx.ui.setStatus(
-				"approval-guardian",
-				activeReviews > 0 ? reviewStatus(activeReviews) : displayedIdleStatus(ctx),
-			);
 		}
 	}
 
@@ -1159,188 +1079,6 @@ function pathReadAction(
 	};
 }
 
-const PRIVATE_COMMAND_DIRECTORIES = [
-	".ssh",
-	".gnupg",
-	".aws",
-	".azure",
-	".kube",
-	".docker",
-	".password-store",
-	"secrets",
-	"secret",
-	"credentials",
-	"keychains",
-	"keyrings",
-];
-
-const PRIVATE_COMMAND_GLOB_FILES = [
-	".env",
-	".env.local",
-	".npmrc",
-	".pypirc",
-	".netrc",
-	".git-credentials",
-	"auth.json",
-	"token.json",
-	"tokens.json",
-	"credentials.json",
-	"secrets.json",
-	"id_rsa",
-	"id_ed25519",
-	"id_ecdsa",
-	"id_dsa",
-	"secret.pem",
-	"secret.key",
-	"secret.p12",
-	"secret.pfx",
-	"secret.jks",
-	"secret.keystore",
-	"secret.kdbx",
-	"terraform.tfvars",
-];
-
-function globExpressionReferencesPrivateData(expression: string): boolean {
-	if (!/[*?\[\]{}]/.test(expression)) return false;
-	return expression
-		.split(/[\s'"`;|&<>()]+/)
-		.map((token) => token.slice(token.lastIndexOf("=") + 1))
-		.some((token) => {
-			const segments = token
-				.replace(/\\/g, "/")
-				.toLowerCase()
-				.split("/")
-				.filter(Boolean);
-			return segments.some((pattern) =>
-				[...PRIVATE_COMMAND_DIRECTORIES, ...PRIVATE_COMMAND_GLOB_FILES].some(
-					(candidate) => shellGlobMatches(pattern, candidate),
-				),
-			);
-		});
-}
-
-function shellGlobMatches(pattern: string, candidate: string): boolean {
-	return expandBracePatterns(pattern).some((expanded) => {
-		const literal = expanded.replace(/\[[^\]]*\]/g, "").replace(/[*?]/g, "");
-		if (literal.length === 0) return false;
-		let source = "^";
-		for (let index = 0; index < expanded.length; index++) {
-			const character = expanded[index];
-			if (character === "*") {
-				source += ".*";
-			} else if (character === "?") {
-				source += ".";
-			} else if (character === "[") {
-				const close = expanded.indexOf("]", index + 1);
-				if (close < 0) {
-					source += "\\[";
-					continue;
-				}
-				let content = expanded.slice(index + 1, close);
-				if (content.startsWith("!")) content = `^${content.slice(1)}`;
-				source += `[${content}]`;
-				index = close;
-			} else {
-				source += escapeRegExp(character);
-			}
-		}
-		try {
-			return new RegExp(`${source}$`, "i").test(candidate);
-		} catch {
-			return false;
-		}
-	});
-}
-
-function expandBracePatterns(pattern: string, depth = 0): string[] {
-	if (depth >= 2) return [pattern];
-	const match = /\{([^{}]+)\}/.exec(pattern);
-	if (!match || match.index === undefined) return [pattern];
-	const options = match[1].split(",");
-	if (options.length === 0 || options.length > 16) return [pattern];
-	const prefix = pattern.slice(0, match.index);
-	const suffix = pattern.slice(match.index + match[0].length);
-	return options.flatMap((option) =>
-		expandBracePatterns(`${prefix}${option}${suffix}`, depth + 1),
-	);
-}
-
-function commandReferencesPrivateData(command: string, cwd: string): boolean {
-	const expanded = command
-		.replace(/\$\{HOME\}|\$HOME/gi, homedir())
-		.replace(/(^|[\s'"=])~(?=\/)/g, `$1${homedir()}`)
-		.replace(/\\/g, "/");
-	const normalized = expanded.toLowerCase();
-	if (
-		PRIVATE_COMMAND_DIRECTORIES.some((directory) =>
-			new RegExp(
-				`(?:^|[\\s'"=/])${escapeRegExp(directory)}(?=$|[\\s'";&|/])`,
-			).test(normalized),
-		)
-	) {
-		return true;
-	}
-	if (globExpressionReferencesPrivateData(expanded)) return true;
-	if (referencesDynamicPiPath(expanded)) return true;
-	if (commandPiPaths(expanded).some((path) => classifyReadPath(path, cwd).private)) {
-		return true;
-	}
-	return /(?:^|[\s'"=\/])(?:\.env(?:\.[^\s'";|&\/]*)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|auth\.json|tokens?\.json|credentials(?:\.json)?|secrets?\.json|id_(?:rsa|ed25519|ecdsa|dsa)|[^\s'";|&\/]+\.(?:pem|key|p12|pfx|jks|keystore|kdbx|tfvars))(?=$|[\s'";|&\/])/i.test(
-		normalized,
-	);
-}
-
-function referencesDynamicPiPath(command: string): boolean {
-	const piTokens = command
-		.split(/[\s'"`;|&<>()]+/)
-		.filter((token) => token.toLowerCase().includes(".pi"));
-	if (piTokens.some((token) => /[*?\[\]{}$]/.test(token))) return true;
-
-	const assignments = command.matchAll(
-		/(?:^|[;\s])([a-z_][a-z0-9_]*)\s*=\s*["']?([^;\s"']*\.pi[^;\s"']*)/gi,
-	);
-	for (const assignment of assignments) {
-		const variable = assignment[1];
-		if (!variable) continue;
-		const remaining = command.slice(
-			(assignment.index ?? 0) + assignment[0].length,
-		);
-		const variableReference = new RegExp(
-			`\\$(?:${escapeRegExp(variable)}\\b|\\{${escapeRegExp(variable)}\\})`,
-		);
-		if (variableReference.test(remaining)) return true;
-	}
-	return false;
-}
-
-function commandPiPaths(command: string): string[] {
-	return command
-		.split(/[\s'"`;|&<>()]+/)
-		.map((token) => token.slice(token.lastIndexOf("=") + 1))
-		.map((token) => token.replace(/^[\[{]+|[\]},]+$/g, ""))
-		.filter((token) => {
-			const normalized = token.toLowerCase();
-			return (
-				normalized === ".pi" ||
-				normalized.startsWith(".pi/") ||
-				normalized.includes("/.pi/") ||
-				normalized.endsWith("/.pi")
-			);
-		});
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function looksLikePrivateGlob(glob: string): boolean {
-	return (
-		/(?:^|[\\/])(?:\.env(?:[.*]|$)|secrets?(?:[\\/.*]|$)|credentials?(?:[\\/.*]|$)|\.ssh(?:[\\/]|$)|\.gnupg(?:[\\/]|$)|\.aws(?:[\\/]|$)|\.kube(?:[\\/]|$)|[^/\\]*\.(?:pem|key|p12|pfx|tfvars)(?:$|[},]))/i.test(
-			glob,
-		) || globExpressionReferencesPrivateData(glob)
-	);
-}
-
 function shouldReviewMutationTarget(
 	level: ReviewLevel,
 	target: ReturnType<typeof classifyMutationPath>,
@@ -1462,12 +1200,6 @@ function reviewResultDiagnostic(result: GuardianReviewResult): string {
 		return singleLine(result.message);
 	}
 	return result.kind;
-}
-
-function reviewStatus(activeReviews: number): string {
-	return activeReviews > 1
-		? `Guardian · reviewing ${activeReviews}`
-		: "Guardian · reviewing";
 }
 
 function formatDuration(timeoutMs: number): string {

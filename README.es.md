@@ -153,7 +153,7 @@ Cuando necesites suspender intencionalmente la revisión durante el runtime actu
 /approval-guardian bypass
 ```
 
-El footer muestra continuamente `Guardian · BYPASSED` y una advertencia de una línea permanece debajo del editor, incluso si otra extensión sustituye el footer. Durante el bypass, las llamadas protegidas del agent omiten la clasificación de Guardian, la inferencia del reviewer, el bloqueo del input aprobado y el circuit enforcement; otras extensiones y comprobaciones internas de las tools siguen activas. Para restaurar la protección:
+Mientras el bypass está activo, una advertencia de una línea permanece debajo del editor. Durante el bypass, las llamadas protegidas del agent omiten la clasificación de Guardian, la inferencia del reviewer, el bloqueo del input aprobado y el circuit enforcement; otras extensiones y comprobaciones internas de las tools siguen activas. Para restaurar la protección:
 
 ```text
 /approval-guardian enable

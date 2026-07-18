@@ -170,7 +170,7 @@ Primary model、fallback model 與 timeout precedence：`environment > trusted p
 /approval-guardian bypass
 ```
 
-footer 會持續顯示 `Guardian · BYPASSED`，editor 下方也會保留單行警告，因此其他 extension 即使替換 footer，警告仍會顯示。停用期間，受保護的 agent tool call 會略過 Guardian 分類、reviewer 推論、核准 input 鎖定與 circuit enforcement；其他 extension 或 tool 內部檢查仍然有效。要恢復保護，執行：
+bypass 期間，editor 下方會持續保留單行警告。停用期間，受保護的 agent tool call 會略過 Guardian 分類、reviewer 推論、核准 input 鎖定與 circuit enforcement；其他 extension 或 tool 內部檢查仍然有效。要恢復保護，執行：
 
 ```text
 /approval-guardian enable
