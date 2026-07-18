@@ -13,10 +13,12 @@ import approvalGuardian, {
 	reviewerToolsForAction,
 	runReviewWithFallbackChain,
 	shouldFallbackReview,
+	shouldInvalidateDirectoryScanCache,
 	type ReviewerChannel,
 	toolCallBatchInfo,
 } from "../extensions/index.ts";
 import { DEFAULT_REVIEW_RULES, loadGuardianConfig } from "../src/config.ts";
+import { DirectoryScanCache } from "../src/directory-scan-cache.ts";
 import { DenialCircuitBreaker, ReviewBatchTracker } from "../src/gate.ts";
 import { ReviewerSessionController } from "../src/reviewer-session.ts";
 
@@ -272,6 +274,86 @@ test("reviews broad find and ls scopes that contain private descendants", () => 
 			{ ...DEFAULT_REVIEW_RULES },
 		);
 		assert.equal(action?.payload.private_data_read, true, toolName);
+	}
+});
+
+test("invalidates cached directory scopes after potentially mutating tools", async () => {
+	const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
+	const cache = new DirectoryScanCache({ ttlMs: 1_000, now: () => 0 });
+	approvalGuardian(
+		{
+			on: (name: string, handler: (event: unknown, ctx: never) => unknown) => {
+				handlers.set(name, handler);
+			},
+			registerCommand: () => undefined,
+		} as never,
+		{ directoryScanCache: cache },
+	);
+	const root = mkdtempSync(join(tmpdir(), "guardian-action-cache-"));
+	const project = join(root, "project");
+	mkdirSync(project);
+	writeFileSync(join(project, "app.ts"), "export const token = true;");
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+	const input = { path: project, pattern: "token" };
+	const branch = [
+		{
+			type: "message",
+			id: "cache-prime-batch",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "cache-prime-call" }],
+			},
+		},
+	];
+	const ctx = {
+		cwd: project,
+		isProjectTrusted: () => false,
+		sessionManager: { getBranch: () => branch },
+		abort: () => undefined,
+		ui: { notify: () => undefined },
+	} as never;
+
+	try {
+		const initial = event("grep", input);
+		(initial as { toolCallId: string }).toolCallId = "cache-prime-call";
+		assert.equal(await handlers.get("tool_call")?.(initial, ctx), undefined);
+		assert.equal(cache.size, 1, "the extension should populate the injected cache");
+
+		writeFileSync(join(project, ".env"), "TOKEN=test");
+		assert.equal(
+			actionFromToolCall(
+				event("grep", input),
+				project,
+				{ ...DEFAULT_REVIEW_RULES },
+				cache,
+			),
+			undefined,
+			"the unexpired scan should be reused before invalidation",
+		);
+
+		await handlers.get("tool_execution_end")?.(
+			{ toolName: "write", toolCallId: "mutation-call" },
+			ctx,
+		);
+		assert.equal(cache.size, 0, "the mutation event should clear the cache");
+		const rescanned = actionFromToolCall(
+			event("grep", input),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+			cache,
+		);
+		assert.equal(rescanned?.payload.private_data_read, true);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	}
+
+	for (const toolName of ["read", "grep", "find", "ls"]) {
+		assert.equal(shouldInvalidateDirectoryScanCache(toolName), false, toolName);
+	}
+	for (const toolName of ["bash", "write", "edit", "custom_tool"]) {
+		assert.equal(shouldInvalidateDirectoryScanCache(toolName), true, toolName);
 	}
 });
 

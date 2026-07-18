@@ -1,10 +1,17 @@
 // pi-lens-ignore: find-import-file-without-extension
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
+import {
+	mkdtempSync,
+	mkdirSync,
+	realpathSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { DirectoryScanCache } from "../src/directory-scan-cache.ts";
 import {
 	AUTO_REVIEW_DENIAL_WINDOW_SIZE,
 	DenialCircuitBreaker,
@@ -14,6 +21,7 @@ import {
 	circuitOutcomeForReview,
 	classifyMutationPath,
 	classifyReadPath,
+	directoryMayContainPrivatePath,
 	requiresExplicitReadAuthorization,
 	shouldReviewMutation,
 	shouldReviewPath,
@@ -307,6 +315,75 @@ test("narrows Pi private reads to known confidential data", () => {
 			"/repo/project",
 		).private,
 		false,
+	);
+});
+
+test("keeps directory scan caching short-lived and memory-bounded", () => {
+	let now = 0;
+	const cache = new DirectoryScanCache({
+		ttlMs: 1_000,
+		maxEntries: 2,
+		now: () => now,
+	});
+	const first = mkdtempSync(join(tmpdir(), "guardian-scan-cache-first-"));
+	writeFileSync(join(first, "app.ts"), "export const value = true;");
+	assert.equal(
+		directoryMayContainPrivatePath(first, first, undefined, 10_000, cache),
+		false,
+	);
+	writeFileSync(join(first, ".env"), "TOKEN=test");
+	assert.equal(
+		directoryMayContainPrivatePath(first, first, undefined, 10_000, cache),
+		false,
+		"the same query should reuse its unexpired in-memory result",
+	);
+	now = 1_001;
+	assert.equal(
+		directoryMayContainPrivatePath(first, first, undefined, 10_000, cache),
+		true,
+		"an expired result must rescan the directory",
+	);
+
+	for (const name of ["second", "third"]) {
+		const project = mkdtempSync(
+			join(tmpdir(), `guardian-scan-cache-${name}-`),
+		);
+		writeFileSync(join(project, "app.ts"), "export {};");
+		directoryMayContainPrivatePath(project, project, undefined, 10_000, cache);
+	}
+	assert.equal(cache.size, 2, "the LRU cache must remain bounded");
+	cache.clear();
+	assert.equal(cache.size, 0);
+
+	const lru = new DirectoryScanCache({
+		ttlMs: 1_000,
+		maxEntries: 2,
+		now: () => 0,
+	});
+	lru.set("/first", undefined, 10_000, false);
+	lru.set("/second", undefined, 10_000, true);
+	assert.equal(lru.get("/first", undefined, 10_000), false);
+	lru.set("/third", undefined, 10_000, true);
+	assert.equal(
+		lru.get("/second", undefined, 10_000),
+		undefined,
+		"the least recently used entry should be evicted",
+	);
+	assert.equal(lru.get("/first", undefined, 10_000), false);
+	assert.equal(lru.get("/third", undefined, 10_000), true);
+});
+
+test("uses a monotonic default clock for cache expiry", async (t) => {
+	let wallClock = 10_000;
+	t.mock.method(Date, "now", () => wallClock);
+	const cache = new DirectoryScanCache({ ttlMs: 5 });
+	cache.set("/scope", undefined, 10_000, false);
+	wallClock = -10_000;
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(
+		cache.get("/scope", undefined, 10_000),
+		undefined,
+		"wall-clock rollback must not extend the cache lifetime",
 	);
 });
 

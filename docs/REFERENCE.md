@@ -160,6 +160,8 @@ The classifier checks:
 
 Common dependency/build directories are skipped during descendant scanning.
 
+Directory-scope scan results use a process-local, memory-only LRU cache with a monotonic one-second TTL and at most 128 query keys. Cache keys include the canonical root, selector glob, and scan limit. The cache is cleared on session lifecycle resets, before each agent run, across temporary-bypass transitions, and after `bash`, `write`, `edit`, or any other tool not known to be read-only. `read`, `grep`, `find`, and `ls` may reuse an unexpired result. Nothing is written to disk, and the short TTL bounds staleness from filesystem changes made by other processes.
+
 ## Mutation classification
 
 `write` and `edit` are reviewed when the canonical target is outside the canonical project root or matches a sensitive mutation category.

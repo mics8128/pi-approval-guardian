@@ -19,6 +19,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ReviewLevel } from "./config.ts";
+import type { DirectoryScanCache } from "./directory-scan-cache.ts";
 import {
 	hasSensitiveMutationSuffix,
 	isCommonPrivateDirectory,
@@ -318,15 +319,24 @@ export function directoryMayContainPrivatePath(
 	cwd: string,
 	glob?: string,
 	maxEntries = 10_000,
+	cache?: DirectoryScanCache,
 ): boolean {
 	const root = classifyReadPath(path, cwd);
+	const cached = cache?.get(root.absolutePath, glob, maxEntries);
+	if (cached !== undefined) return cached;
+	const finish = (value: boolean) => {
+		cache?.set(root.absolutePath, glob, maxEntries, value);
+		return value;
+	};
 	let rootStat: ReturnType<typeof lstatSync>;
 	try {
 		rootStat = lstatSync(root.absolutePath);
 	} catch {
-		return root.private;
+		return finish(root.private);
 	}
-	if (!rootStat.isDirectory()) return root.private && globMatches(path, glob);
+	if (!rootStat.isDirectory()) {
+		return finish(root.private && globMatches(path, glob));
+	}
 	const pending = [{ directory: root.absolutePath, privateAncestor: root.private }];
 	const visited = new Set<string>();
 	let scanned = 0;
@@ -345,12 +355,12 @@ export function directoryMayContainPrivatePath(
 		try {
 			entries = readdirSync(current.directory, { withFileTypes: true });
 		} catch {
-			if (current.privateAncestor) return true;
+			if (current.privateAncestor) return finish(true);
 			continue;
 		}
 		for (const entry of entries) {
 			scanned++;
-			if (scanned > maxEntries) return true;
+			if (scanned > maxEntries) return finish(true);
 			const child = join(current.directory, entry.name);
 			const childPrivate =
 				current.privateAncestor || classifyReadPath(child, cwd).private;
@@ -361,10 +371,10 @@ export function directoryMayContainPrivatePath(
 				continue;
 			}
 			const relativeChild = relative(root.absolutePath, child).replace(/\\/g, "/");
-			if (childPrivate && globMatches(relativeChild, glob)) return true;
+			if (childPrivate && globMatches(relativeChild, glob)) return finish(true);
 		}
 	}
-	return false;
+	return finish(false);
 }
 
 function globMatches(path: string, glob?: string): boolean {
