@@ -1,6 +1,6 @@
 # pi-approval-guardian
 
-**Pi tool call을 fail-closed 방식으로 자동 검토합니다.**
+**Pi tool call을 기본 fail-closed 방식으로 자동 검토합니다.**
 
 Agent가 shell command, private data read, 프로젝트 외부 또는 sensitive file 수정을 실행하기 전에 격리 reviewer model이 평가합니다.
 
@@ -63,7 +63,7 @@ Pi agent tool call
         execute   block
 ```
 
-유효한 `outcome: "allow"`만 실행됩니다. Deny, timeout, invalid output, auth/model/provider failure, cancel, circuit open은 모두 fail closed입니다.
+Guardian이 enabled인 동안 protected action은 reviewer가 유효한 `outcome: "allow"`를 반환한 경우에만 실행됩니다. Deny, timeout, invalid output, auth/model/provider failure, cancel, circuit open은 모두 fail closed입니다.
 
 Private data access에는 user transcript의 명시적 승인과 reviewer의 `user_authorization: "high"`가 필요합니다.
 
@@ -141,9 +141,29 @@ Environment variables: `PI_APPROVAL_GUARDIAN_MODEL`, `PI_APPROVAL_GUARDIAN_FALLB
 
 Primary model/fallback model/timeout precedence: `environment > trusted project > global > built-in default`. Policy는 global, trusted project, environment 설정을 합산합니다.
 
-Malformed 또는 unsupported 설정은 UI warning을 표시한 뒤 무시되며, 나머지 valid settings와 built-in defaults는 계속 적용됩니다. 따라서 config typo가 tools 전체를 block하지 않습니다. Protected action은 reviewer가 valid allow를 반환하지 않으면 계속 fail closed입니다.
+Malformed 또는 unsupported 설정은 UI warning을 표시한 뒤 무시되며, 나머지 valid settings와 built-in defaults는 계속 적용됩니다. 따라서 config typo가 tools 전체를 block하지 않습니다. 임시 bypass가 inactive인 동안 protected action은 reviewer가 valid allow를 반환하지 않으면 계속 fail closed입니다.
 
 `/approval-guardian`으로 primary, configured fallback, current-model fallback의 readiness와 config source를, `/approval-guardian rules`로 effective rules를 확인할 수 있습니다.
+
+### 임시 bypass
+
+현재 Pi runtime에서 review를 잠시 중단해야 할 때:
+
+```text
+/approval-guardian bypass
+```
+
+footer에 `Guardian · BYPASSED`가 계속 표시되고 editor 아래에도 one-line warning이 유지되므로 다른 extension이 footer를 교체해도 경고가 보입니다. bypass 중 protected agent tool call은 Guardian classification, reviewer inference, approved-input lock, circuit enforcement를 건너뛰지만 other extension과 tool-internal check는 계속 적용됩니다. Protection을 복구하려면:
+
+```text
+/approval-guardian enable
+```
+
+Command는 active agent run이 완전히 settle될 때까지 기다린 뒤 state를 전환합니다. 이미 block된 call을 release/retry하지 않고, 새 agent turn을 시작하지 않으며, agent에 추가 authorization을 부여하지도 않습니다. bypass는 memory-only이며 `/reload`, `/new`, `/resume`, `/fork`, process restart 시 자동으로 해제됩니다. Interactive TUI mode에서만 활성화할 수 있으며 persistent warning을 보장할 수 없는 RPC, JSON, print mode에서는 거부됩니다.
+
+bypass/enable 알림은 UI-only입니다. Guardian은 이 control state를 agent context에 의도적으로 주입하지 않습니다. 영구적인 “bypassed” message는 재활성화 후 stale해지거나 permission으로 오해될 수 있습니다. 수행할 작업은 agent에 별도로 명확히 지시해야 합니다.
+
+중요한 security boundary를 제거하므로 명확하고 짧은 시간 범위에서만 사용하세요.
 
 ## 업데이트 / 제거
 
@@ -179,7 +199,8 @@ Versioned npm spec은 pin됩니다. Pin을 변경하려면 새로운 explicit ve
 - allow 후 Guardian은 JSON-like tool input을 검증하고 lock하여 이후 `tool_call` handler 변경을 막습니다. Exotic runtime value는 fail closed 처리됩니다. commandPrefix, spawnHook, custom tool internal behavior, dispatch 후 filesystem은 관찰하지 못합니다.
 - Pathless 또는 nested-path custom tools, MCP, network, browser, email, deployment, subagent action은 자동으로 모두 보호되지 않으며 dedicated enforcement가 필요합니다.
 - Filesystem state는 review와 execution 사이에 변경될 수 있습니다.
-- Primary, configured fallback, distinct current-model fallback을 모두 사용할 수 없으면 protected action은 fail closed로 block됩니다.
+- Guardian이 enabled인 동안 Primary, configured fallback, distinct current-model fallback을 모두 사용할 수 없으면 protected action은 fail closed로 block됩니다.
+- User-enabled temporary bypass는 재활성화 또는 자동 reset까지 Guardian review, input lock, circuit enforcement를 의도적으로 중단합니다.
 
 전체 기술 설명: [docs/REFERENCE.md](docs/REFERENCE.md)
 

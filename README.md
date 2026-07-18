@@ -1,6 +1,6 @@
 # pi-approval-guardian
 
-**A fail-closed approval gate for Pi tool calls.**
+**A fail-closed-by-default approval gate for Pi tool calls.**
 
 It reviews agent shell commands, private-data access, and sensitive file mutations with an isolated reviewer model before execution.
 
@@ -63,7 +63,7 @@ Pi agent tool call
        execute     block
 ```
 
-Only a valid reviewer response with `outcome: "allow"` permits execution. Denials, timeouts, invalid output, missing authentication, provider failures, cancellation, and an open circuit all fail closed.
+While Guardian is enabled, only a valid reviewer response with `outcome: "allow"` permits a covered action to execute. Denials, timeouts, invalid output, missing authentication, provider failures, cancellation, and an open circuit all fail closed.
 
 Private-data access additionally requires explicit authorization in the user transcript and reviewer `user_authorization: "high"`. The reviewer cannot inspect the pending private target while deciding whether access is authorized.
 
@@ -172,9 +172,29 @@ environment > trusted project > global > built-in default
 
 Policy is additive across global, trusted-project, and environment configuration.
 
-Malformed or unsupported settings produce UI warnings and are ignored; remaining valid settings and built-in defaults stay active, so a configuration typo does not globally block tools. Covered actions still fail closed unless a reviewer returns a valid allow decision.
+Malformed or unsupported settings produce UI warnings and are ignored; remaining valid settings and built-in defaults stay active, so a configuration typo does not globally block tools. While temporary bypass is inactive, covered actions still fail closed unless a reviewer returns a valid allow decision.
 
 Run `/approval-guardian` to inspect primary, configured-fallback, and current-model readiness plus effective config sources, or `/approval-guardian rules` for the rule matrix.
+
+### Temporary bypass
+
+When you intentionally need to suspend review for the current Pi runtime:
+
+```text
+/approval-guardian bypass
+```
+
+The footer continuously shows `Guardian · BYPASSED`, and a one-line warning remains below the editor even when another extension replaces the footer. Covered agent tool calls then proceed without Guardian classification, reviewer inference, approved-input locking, or circuit enforcement; other extensions and tool-internal checks still apply. Restore protection with:
+
+```text
+/approval-guardian enable
+```
+
+The command waits for the active agent run to settle. It does not release or retry a call that was already blocked, trigger a new agent turn, or grant the agent additional authorization. The bypass is memory-only and resets on `/reload`, `/new`, `/resume`, `/fork`, or process restart. Activation is limited to interactive TUI mode; RPC, JSON, and print modes are refused because a persistent warning cannot be guaranteed.
+
+Bypass and enable notices are UI-only. Guardian intentionally does not inject this control state into agent context: a persisted “bypassed” message could become stale after re-enabling and could be misread as permission. Give the agent a separate, explicit instruction for the work you want performed.
+
+This removes a major security boundary; use it only for a short, intentional window.
 
 ## Update and remove
 
@@ -218,7 +238,8 @@ A versioned install such as `npm:pi-approval-guardian@<version>` is pinned. Inst
 - After an allow, Guardian validates and locks JSON-like tool input against later `tool_call` handler mutation; exotic runtime values fail closed. It does not observe commandPrefix, spawnHook, custom-tool internals, or filesystem changes after dispatch.
 - Arbitrary pathless or nested-path custom tools, MCP, network, browser, email, deployment, and subagent actions are not automatically gated; they need dedicated enforcement.
 - Filesystem state can change between review and execution.
-- If the configured primary, configured fallback, and distinct current-model fallback are all unavailable, protected actions fail closed.
+- If the configured primary, configured fallback, and distinct current-model fallback are all unavailable, protected actions fail closed while Guardian is enabled.
+- A user-enabled temporary bypass intentionally removes Guardian review, input locking, and circuit enforcement until it is re-enabled or automatically reset.
 - Use Pi project trust and OS/container sandboxing separately; they solve different security layers.
 
 For the full behavior and configuration contract, see [docs/REFERENCE.md](docs/REFERENCE.md).
@@ -239,7 +260,7 @@ Test the local package without installing it:
 pi -e .
 ```
 
-Issues and focused pull requests are welcome. Security-sensitive changes should include regression tests and preserve fail-closed behavior.
+Issues and focused pull requests are welcome. Security-sensitive changes should include regression tests and preserve fail-closed behavior outside the explicit temporary-bypass path.
 
 Maintainers: see [docs/PUBLISHING.md](docs/PUBLISHING.md).
 

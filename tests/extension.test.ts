@@ -848,6 +848,249 @@ test("registers lifecycle health and verifies command authentication", async () 
 	assert.doesNotMatch(notices.join("\n"), /Fallback unavailable:/);
 });
 
+test("temporarily bypasses reviews with a persistent UI-only warning", async () => {
+	const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
+	const commands = new Map<
+		string,
+		{
+			handler: (args: string, ctx: never) => unknown;
+			getArgumentCompletions?: (
+				prefix: string,
+			) => Array<{ value: string }> | null;
+		}
+	>();
+	approvalGuardian({
+		on: (name: string, handler: (event: unknown, ctx: never) => unknown) => {
+			handlers.set(name, handler);
+		},
+		registerCommand: (
+			name: string,
+			options: {
+				handler: (args: string, ctx: never) => unknown;
+				getArgumentCompletions?: (
+					prefix: string,
+				) => Array<{ value: string }> | null;
+			},
+		) => commands.set(name, options),
+	} as never);
+
+	const originalReview = ReviewerSessionController.prototype.review;
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const previousPrimary = process.env.PI_APPROVAL_GUARDIAN_MODEL;
+	const previousFallback = process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL;
+	const root = mkdtempSync(join(tmpdir(), "guardian-bypass-"));
+	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+	process.env.PI_APPROVAL_GUARDIAN_MODEL = "test/reviewer";
+	process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL = "test/reviewer";
+	let reviewCalls = 0;
+	ReviewerSessionController.prototype.review = async function () {
+		reviewCalls++;
+		return {
+			kind: "allowed",
+			assessment: {
+				risk_level: "low",
+				user_authorization: "unknown",
+				outcome: "allow",
+				rationale: "Safe test action.",
+			},
+		};
+	} as typeof originalReview;
+
+	const statuses: Array<[string, string | undefined]> = [];
+	const widgets: Array<
+		[string, string[] | undefined, { placement?: string } | undefined]
+	> = [];
+	const notices: string[] = [];
+	let waitForIdleCalls = 0;
+	let branchReads = 0;
+	let mode = "tui";
+	let branch: unknown[] = [];
+	const model = { provider: "test", id: "reviewer" };
+	const ctx = {
+		cwd: join(root, "project"),
+		hasUI: true,
+		get mode() {
+			return mode;
+		},
+		isProjectTrusted: () => false,
+		model,
+		modelRegistry: {
+			find: (provider: string, modelId: string) =>
+				provider === model.provider && modelId === model.id ? model : undefined,
+			hasConfiguredAuth: () => true,
+			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }),
+		},
+		sessionManager: {
+			getBranch: () => {
+				branchReads++;
+				return branch;
+			},
+		},
+		signal: undefined,
+		abort: () => undefined,
+		waitForIdle: async () => {
+			waitForIdleCalls++;
+		},
+		ui: {
+			theme: {
+				fg: (_color: string, text: string) => text,
+			},
+			setStatus: (key: string, value: string | undefined) =>
+				statuses.push([key, value]),
+			setWidget: (
+				key: string,
+				lines: string[] | undefined,
+				options?: { placement?: string },
+			) => widgets.push([key, lines, options]),
+			notify: (message: string) => notices.push(message),
+		},
+	} as never;
+	const command = commands.get("approval-guardian");
+	assert.ok(command);
+
+	try {
+		await handlers.get("session_start")?.({}, ctx);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · ready",
+		]);
+		assert.deepEqual(
+			command.getArgumentCompletions?.("")?.map(({ value }) => value),
+			["rules", "bypass", "enable"],
+		);
+
+		notices.length = 0;
+		await command.handler("bypass", ctx);
+		assert.equal(waitForIdleCalls, 1);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · BYPASSED",
+		]);
+		assert.equal(widgets.at(-1)?.[0], "approval-guardian-bypass");
+		assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /BYPASSED/);
+		assert.equal(widgets.at(-1)?.[2]?.placement, "belowEditor");
+		assert.match(notices.join("\n"), /temporarily BYPASSED/);
+		assert.match(notices.join("\n"), /does not grant.*authorization/i);
+
+		const bypassed = event("bash", { command: "echo bypassed" });
+		(bypassed as { toolCallId: string }).toolCallId = "bypass-call";
+		assert.equal(await handlers.get("tool_call")?.(bypassed, ctx), undefined);
+		assert.equal(reviewCalls, 0);
+		assert.equal(branchReads, 0);
+		assert.equal(Object.isFrozen(bypassed.input), false);
+		assert.equal(
+			await handlers.get("before_agent_start")?.({}, ctx),
+			undefined,
+			"bypass state must not be injected into agent context",
+		);
+
+		notices.length = 0;
+		await command.handler("", ctx);
+		assert.match(notices.join("\n"), /BYPASSED · underlying ready/);
+		assert.match(notices.join("\n"), /reviews disabled/);
+		assert.doesNotMatch(notices.join("\n"), /BYPASSED[^\n]*fail-closed/);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · BYPASSED",
+		]);
+
+		notices.length = 0;
+		await command.handler("bypass", ctx);
+		assert.equal(waitForIdleCalls, 2);
+		assert.match(notices.join("\n"), /already temporarily bypassed/);
+
+		notices.length = 0;
+		await command.handler("enable", ctx);
+		assert.equal(waitForIdleCalls, 3);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · ready",
+		]);
+		assert.deepEqual(widgets.at(-1), [
+			"approval-guardian-bypass",
+			undefined,
+			undefined,
+		]);
+		assert.match(notices.join("\n"), /enabled again/);
+
+		notices.length = 0;
+		await command.handler("enable", ctx);
+		assert.equal(waitForIdleCalls, 4);
+		assert.match(notices.join("\n"), /already enabled/);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · ready",
+		]);
+
+		branch = [
+			{
+				type: "message",
+				id: "enabled-batch",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "enabled-call" }],
+				},
+			},
+		];
+		const enabled = event("bash", { command: "echo reviewed" });
+		(enabled as { toolCallId: string }).toolCallId = "enabled-call";
+		assert.equal(await handlers.get("tool_call")?.(enabled, ctx), undefined);
+		assert.equal(reviewCalls, 1);
+		assert.equal(Object.isFrozen(enabled.input), true);
+
+		await command.handler("bypass", ctx);
+		await handlers.get("session_start")?.({}, ctx);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · ready",
+		]);
+		assert.deepEqual(widgets.at(-1), [
+			"approval-guardian-bypass",
+			undefined,
+			undefined,
+		]);
+		branch = [
+			{
+				type: "message",
+				id: "reset-batch",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "reset-call" }],
+				},
+			},
+		];
+		const reset = event("bash", { command: "echo reviewed-after-reset" });
+		(reset as { toolCallId: string }).toolCallId = "reset-call";
+		assert.equal(await handlers.get("tool_call")?.(reset, ctx), undefined);
+		assert.equal(reviewCalls, 2);
+		assert.equal(Object.isFrozen(reset.input), true);
+
+		const waitsBeforeUnsupportedModes = waitForIdleCalls;
+		for (const unsupportedMode of ["rpc", "json", "print"]) {
+			mode = unsupportedMode;
+			await assert.rejects(
+				command.handler("bypass", ctx) as Promise<void>,
+				/requires interactive TUI mode/,
+			);
+		}
+		assert.equal(waitForIdleCalls, waitsBeforeUnsupportedModes);
+		assert.deepEqual(statuses.at(-1), [
+			"approval-guardian",
+			"Guardian · ready",
+		]);
+	} finally {
+		ReviewerSessionController.prototype.review = originalReview;
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		if (previousPrimary === undefined)
+			delete process.env.PI_APPROVAL_GUARDIAN_MODEL;
+		else process.env.PI_APPROVAL_GUARDIAN_MODEL = previousPrimary;
+		if (previousFallback === undefined)
+			delete process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL;
+		else process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL = previousFallback;
+	}
+});
+
 test("warns and continues when configuration entries are unsupported", async () => {
 	const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
 	const commands = new Map<string, { handler: (args: string, ctx: never) => unknown }>();

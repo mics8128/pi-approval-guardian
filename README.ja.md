@@ -1,6 +1,6 @@
 # pi-approval-guardian
 
-**Pi の tool call を fail-closed で自動審査します。**
+**Pi の tool call を default fail-closed で自動審査します。**
 
 Agent が shell command、private data read、プロジェクト外または sensitive file の変更を実行する前に、隔離 reviewer model が評価します。
 
@@ -63,7 +63,7 @@ Pi agent tool call
         execute   block
 ```
 
-有効な `outcome: "allow"` のみ実行します。Deny、timeout、不正 output、auth/model/provider failure、cancel、circuit open はすべて fail closed です。
+Guardian が enabled の間、protected action は reviewer が有効な `outcome: "allow"` を返した場合のみ実行されます。Deny、timeout、不正 output、auth/model/provider failure、cancel、circuit open はすべて fail closed です。
 
 Private data access には user transcript 上の明示承認と reviewer の `user_authorization: "high"` が必要です。
 
@@ -141,9 +141,29 @@ Environment variables：`PI_APPROVAL_GUARDIAN_MODEL`、`PI_APPROVAL_GUARDIAN_FAL
 
 Primary model/fallback model/timeout precedence：`environment > trusted project > global > built-in default`。Policy は global、trusted project、environment の設定を加算します。
 
-Malformed または unsupported な設定は UI warning を表示して無視され、残りの valid settings と built-in defaults が有効なままなので、config typo が tools を global に block することはありません。Protected action は reviewer が valid allow を返さない限り引き続き fail closed です。
+Malformed または unsupported な設定は UI warning を表示して無視され、残りの valid settings と built-in defaults が有効なままなので、config typo が tools を global に block することはありません。一時 bypass が inactive の間、protected action は reviewer が valid allow を返さない限り引き続き fail closed です。
 
 `/approval-guardian` で primary、configured fallback、current-model fallback の readiness と config source、`/approval-guardian rules` で effective rules を確認できます。
+
+### 一時 bypass
+
+現在の Pi runtime で review を短時間だけ停止する場合：
+
+```text
+/approval-guardian bypass
+```
+
+footer には `Guardian · BYPASSED` が継続表示され、editor 下にも one-line warning が残るため、別 extension が footer を置き換えても warning は表示されます。bypass 中の protected agent tool call は Guardian classification、reviewer inference、approved-input lock、circuit enforcement を skip しますが、other extension と tool-internal check は引き続き有効です。Protection を戻すには：
+
+```text
+/approval-guardian enable
+```
+
+Command は active agent run が完全に settle するまで待ってから state を切り替えます。すでに block された call を release/retry せず、新しい agent turn を開始せず、agent への追加 authorization にもなりません。bypass は memory-only で、`/reload`、`/new`、`/resume`、`/fork`、process restart で自動的に解除されます。Interactive TUI mode でのみ有効化でき、persistent warning を保証できない RPC、JSON、print mode では拒否されます。
+
+bypass/enable notice は UI-only です。Guardian はこの control state を agent context に意図的に注入しません。永続化された「bypassed」message は再有効化後に stale になったり、permission と誤解されたりする可能性があります。実行してほしい作業は agent に別途明示してください。
+
+これは重要な security boundary を外すため、明確で短い時間窓だけで使用してください。
 
 ## Update / remove
 
@@ -179,7 +199,8 @@ Versioned npm spec は pin されます。Pin を進めるには新しい explic
 - allow 後、Guardian は JSON-like tool input を検証して lock し、後続 `tool_call` handler の変更を防ぎます。Exotic runtime value は fail closed になります。commandPrefix、spawnHook、custom tool internal behavior、dispatch 後の filesystem は観測できません。
 - Pathless または nested-path custom tools、MCP、network、browser、email、deployment、subagent action は自動的にすべて保護されず、dedicated enforcement が必要です。
 - Filesystem state は review と execution の間に変化する可能性があります。
-- Primary、configured fallback、distinct current-model fallback がすべて unavailable の場合、protected action は fail closed で block されます。
+- Guardian が enabled の間、Primary、configured fallback、distinct current-model fallback がすべて unavailable の場合、protected action は fail closed で block されます。
+- User-enabled temporary bypass は、再有効化または自動 reset まで Guardian review、input lock、circuit enforcement を意図的に停止します。
 
 詳細は [docs/REFERENCE.md](docs/REFERENCE.md) を参照してください。
 
