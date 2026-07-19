@@ -86,7 +86,7 @@ Guardian 启用时，受保护动作只有在 reviewer 返回有效的 `outcome:
 ## Reviewer 行为
 
 - Reviewer 状态使用独立的 in-memory session；最后 fallback 可使用主 session 的 model identity，但不会复用主对话状态。
-- 普通审查仅提供 `read`、`grep`、`find`、`ls`。
+- 普通审查仅提供 `read`、`grep`、`find`、`ls`；reviewer 专用 guard 会在执行前阻止已分类为私密的 path 和 scope。
 - 私密数据授权审查不提供任何工具。
 - Reviewer 不获得 `bash`、`write`、`edit`。
 - Transcript、文件、tool output 和 planned action 均视为不可信 evidence。

@@ -86,7 +86,7 @@ Canonical path と symlink target を確認します。
 ## Reviewer behavior
 
 - Reviewer state は独立した in-memory session を使用します。最後の fallback は main session の model identity を使う場合がありますが、conversation state は再利用しません。
-- Normal review は `read`、`grep`、`find`、`ls` のみ。
+- Normal review は `read`、`grep`、`find`、`ls` のみ。Reviewer 専用 guard が、private と分類された path と scope を実行前に拒否します。
 - Private-data authorization review は tools なし。
 - Reviewer に `bash`、`write`、`edit` を渡しません。
 - Transcript、file、tool output、planned action は untrusted evidence。

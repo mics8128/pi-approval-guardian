@@ -93,7 +93,7 @@ npm version prerelease --preid=beta
 npm publish --tag beta --access public
 ```
 
-Do not publish prereleases under `latest`.
+Do not publish prereleases under `latest`. The tag-triggered GitHub workflow is stable-only and rejects package versions containing a prerelease suffix; use the documented manual dist-tag flow for prereleases.
 
 ## Trusted publishing with GitHub Actions
 

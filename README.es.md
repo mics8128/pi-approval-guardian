@@ -86,7 +86,7 @@ Se comprueban canonical paths y targets de symlinks.
 ## Comportamiento del reviewer
 
 - El estado del reviewer usa una in-memory session aislada; el fallback final puede usar la identidad del model principal, pero nunca su estado de conversación.
-- Reviews normales: solo `read`, `grep`, `find`, `ls`.
+- Reviews normales: solo `read`, `grep`, `find`, `ls`; guards exclusivos del reviewer bloquean antes de ejecutar paths y scopes clasificados como privados.
 - Reviews de autorización privada: sin tools.
 - Nunca recibe `bash`, `write` ni `edit`.
 - Transcript, archivos, tool output y planned action se tratan como evidencia no confiable.

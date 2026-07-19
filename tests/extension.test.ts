@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -261,7 +266,7 @@ test("only marks known confidential Pi paths as private shell access", () => {
 	}
 });
 
-test("reviews broad find and ls scopes that contain private descendants", () => {
+test("reviews recursive find scopes and directly visible private ls entries", () => {
 	const project = mkdtempSync(join(tmpdir(), "guardian-list-"));
 	writeFileSync(join(project, ".env"), "TOKEN=test");
 	for (const [toolName, input] of [
@@ -275,6 +280,90 @@ test("reviews broad find and ls scopes that contain private descendants", () => 
 		);
 		assert.equal(action?.payload.private_data_read, true, toolName);
 	}
+});
+
+test("matches ls review scope to the direct entries Pi can return", () => {
+	const project = mkdtempSync(join(tmpdir(), "guardian-ls-direct-"));
+	const publicDirectory = join(project, "public");
+	const nestedDirectory = join(publicDirectory, "nested");
+	mkdirSync(publicDirectory);
+	mkdirSync(nestedDirectory);
+	writeFileSync(join(nestedDirectory, ".env"), "TOKEN=test");
+
+	assert.equal(
+		actionFromToolCall(
+			event("ls", { path: project }),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+		),
+		undefined,
+		"listing the root only exposes public/ and must not inherit nested privacy",
+	);
+	assert.equal(
+		actionFromToolCall(
+			event("ls", { path: nestedDirectory }),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+		)?.payload.private_data_read,
+		true,
+	);
+});
+
+test("classifies ls direct entries by visible names instead of symlink targets", () => {
+	const project = mkdtempSync(join(tmpdir(), "guardian-ls-symlink-"));
+	const privateRoot = mkdtempSync(join(tmpdir(), "guardian-ls-private-"));
+	const privateTarget = join(privateRoot, ".ssh");
+	mkdirSync(privateTarget);
+	writeFileSync(join(privateTarget, "id_rsa"), "private");
+	const link = join(project, "docs");
+	symlinkSync(
+		privateTarget,
+		link,
+		process.platform === "win32" ? "junction" : "dir",
+	);
+
+	assert.equal(
+		actionFromToolCall(
+			event("ls", { path: project }),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+		),
+		undefined,
+		"listing the parent only exposes the ordinary entry name docs/",
+	);
+	assert.equal(
+		actionFromToolCall(
+			event("ls", { path: link }),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+		)?.payload.private_data_read,
+		true,
+		"listing through the symlink exposes the private target contents",
+	);
+});
+
+test("matches ls privacy checks to its sorted result limit", () => {
+	const project = mkdtempSync(join(tmpdir(), "guardian-ls-limit-"));
+	writeFileSync(join(project, "a.txt"), "public");
+	writeFileSync(join(project, "z.env.key"), "TOKEN=test");
+
+	assert.equal(
+		actionFromToolCall(
+			event("ls", { path: project, limit: 1 }),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+		),
+		undefined,
+		"a private entry beyond Pi's visible result limit is not exposed",
+	);
+	assert.equal(
+		actionFromToolCall(
+			event("ls", { path: project, limit: 2 }),
+			project,
+			{ ...DEFAULT_REVIEW_RULES },
+		)?.payload.private_data_read,
+		true,
+	);
 });
 
 test("invalidates cached directory scopes after potentially mutating tools", async () => {

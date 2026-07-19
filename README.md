@@ -88,7 +88,7 @@ Canonical paths and symlink targets are checked before project-boundary decision
 ## Reviewer behavior
 
 - Keeps reviewer state in an isolated in-memory session; the final fallback may use the main session's model identity but never its conversation state.
-- Provides only read-only investigation tools for normal reviews.
+- Provides only read-only investigation tools for normal reviews; reviewer-only guards reject classified private paths and scopes before execution.
 - Provides no tools for private-data authorization reviews.
 - Never provides `bash`, `write`, or `edit` to the reviewer.
 - Treats transcript, files, tool output, and planned actions as untrusted evidence.

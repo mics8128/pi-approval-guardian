@@ -17,10 +17,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify tag matches package version
+      - name: Verify stable tag matches package version
         run: |
           package_version="$(node -p "require('./package.json').version")"
           test "${GITHUB_REF_NAME}" = "v${package_version}"
+          if [[ "${package_version}" == *-* ]]; then
+            echo "::error::Prerelease versions must use the documented manual dist-tag flow and cannot run the stable publish workflow."
+            exit 1
+          fi
 
       - name: Verify release commit is on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main

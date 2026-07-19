@@ -20,6 +20,11 @@ import {
 	type GuardianAction,
 	type GuardianMessage,
 } from "./review.ts";
+import {
+	DEFAULT_REVIEWER_TOOLS,
+	reviewerToolSessionOptions,
+	type ReviewerToolName,
+} from "./reviewer-tools.ts";
 
 export type ReviewerModel = NonNullable<ReturnType<ModelRegistry["find"]>>;
 export const OFFICIAL_AUTO_REVIEW_MODEL = "openai-codex/codex-auto-review";
@@ -54,7 +59,7 @@ export interface ReviewerSessionOptions {
 	cwd: string;
 	systemPrompt: string;
 	timeoutMs: number;
-	tools?: Array<"read" | "grep" | "find" | "ls">;
+	tools?: ReviewerToolName[];
 }
 
 // Session lifecycle, retry, deadline, and transcript cursor state are cohesive here.
@@ -347,7 +352,10 @@ export class ReviewerSessionController {
 			cwd: this.options.cwd,
 			model: this.options.model,
 			thinkingLevel: "low",
-			tools: this.options.tools ?? ["read", "grep", "find", "ls"],
+			...reviewerToolSessionOptions(
+				this.options.cwd,
+				this.options.tools ?? DEFAULT_REVIEWER_TOOLS,
+			),
 			resourceLoader,
 			sessionManager: SessionManager.inMemory(this.options.cwd),
 			settingsManager,

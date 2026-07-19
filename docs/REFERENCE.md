@@ -2,6 +2,10 @@
 
 This document defines the runtime behavior and configuration contract for `pi-approval-guardian`.
 
+## Design scope
+
+Approval Guardian provides a low-friction baseline that validates and reviews higher-risk agent actions before execution. Its purpose is to stop an agent from freely issuing unchecked shell actions, private-data reads, and sensitive mutations while leaving ordinary project work practical. It is intentionally not a comprehensive policy engine, filesystem snapshot, DLP system, or OS sandbox. New deterministic restrictions should address a concrete bypass or recurring false-negative pattern and should not broadly serialize, block, or add user turns to normal workflows without proportional benefit.
+
 ## Interception matrix
 
 | Rule | Default | Behavior |
@@ -150,7 +154,7 @@ User skill, agent, extension, and installed-package source is not private solely
 
 `grep` defaults to `outside-or-private`: ordinary clean in-project searches bypass reviewer latency, while a broad or omitted path is still reviewed when its effective scope can reach private descendants.
 
-The classifier checks:
+Recursive `grep` and `find` classification checks:
 
 - omitted and empty paths;
 - `*`, `**`, `**/*`, and `*.*`;
@@ -158,9 +162,17 @@ The classifier checks:
 - private descendants within the selected directory;
 - a conservative scan limit that returns private when the directory cannot be bounded safely.
 
-Common dependency/build directories are skipped during descendant scanning.
+Common dependency/build directories are skipped during recursive descendant scanning. `ls` follows Pi's non-recursive behavior instead: it checks the requested directory canonically, then classifies the visible lexical names of sorted direct entries within the requested entry limit without following a direct child's symlink target. A private descendant below an ordinary direct child does not by itself turn `ls` of the parent into a private-data read; byte-level output truncation is intentionally not reproduced, so this remains a conservative approximation of visible output.
 
-Directory-scope scan results use a process-local, memory-only LRU cache with a monotonic one-second TTL and at most 128 query keys. Cache keys include the canonical root, selector glob, and scan limit. The cache is cleared on session lifecycle resets, before each agent run, across temporary-bypass transitions, and after `bash`, `write`, `edit`, or any other tool not known to be read-only. `read`, `grep`, `find`, and `ls` may reuse an unexpired result. Nothing is written to disk, and the short TTL bounds staleness from filesystem changes made by other processes.
+Recursive directory-scope scan results use a process-local, memory-only LRU cache with a monotonic one-second TTL and at most 128 query keys. Cache keys include the canonical root, selector glob, and scan limit. The cache is cleared on session lifecycle resets, before each agent run, across temporary-bypass transitions, and after `bash`, `write`, `edit`, or any other tool not known to be read-only. Repeated `grep` and `find` classifications may reuse an unexpired result; direct `ls` checks are inexpensive and are not cached. Nothing is written to disk, and the short TTL bounds staleness from filesystem changes made by other processes.
+
+### Accepted risk: parallel filesystem TOCTOU
+
+Pi's default parallel tool mode emits and awaits each sibling's preflight in assistant source order before it starts any prepared tool execution. This ordering was verified against [Pi 0.80.7's agent loop](https://github.com/earendil-works/pi/blob/818d67457cdd6b60bce6b121d16b23141c252dd8/packages/agent/src/agent-loop.ts#L491-L544). A mutating sibling therefore cannot already be running while a later sibling is still in `tool_call` classification, so the directory cache is not stale from that sibling during preflight. After every sibling is prepared, Pi may execute allowed reads and mutations concurrently.
+
+The filesystem can consequently change after a fresh classification but before or during the corresponding read. Earlier cache invalidation, a shorter TTL, or disabling the cache would not remove this check-to-use gap. Approval Guardian accepts this residual risk because potentially mutating built-in actions are independently reviewed, meaningful disclosure of previously unknown private data generally requires another classifier/reviewer/custom-tool boundary to fail, and blocking all mixed read/mutation batches would add routine false positives and extra agent turns. This package remains a low-friction approval gate rather than a filesystem snapshot or sandbox.
+
+Reconsider this decision if Pi changes sibling preflight ordering, exposes a low-friction API for dynamically serializing only mixed filesystem batches, the supported threat model expands to untrusted custom-tool internals, or practical evidence shows the gap being exploited. OS/container isolation remains the appropriate boundary when atomic filesystem guarantees are required.
 
 ## Mutation classification
 
@@ -192,7 +204,7 @@ read · grep · find · ls
 
 Private-data reviews provide no investigation tools. Authorization must be decided from the existing user transcript and planned-action metadata.
 
-The reviewer never receives `bash`, `write`, or `edit`, and it loads no extensions, skills, prompt templates, themes, or project context files.
+The reviewer never receives `bash`, `write`, or `edit`, and it loads no extensions, skills, prompt templates, themes, or project context files. Its normal investigation tools are reviewer-only wrappers that deterministically reject paths, selectors, and effective scopes classified as private before delegating to Pi's built-in read-only implementations. This containment uses the same heuristic path rules as the main gate and retains their documented limits.
 
 Transcript, tool output, file content, retry reasons, and planned actions are framed as untrusted evidence rather than instructions.
 
@@ -288,7 +300,7 @@ When the circuit opens, the current run is aborted and later covered actions are
 - Shell commands are not parsed as a complete shell AST.
 - Arbitrary pathless or nested-path custom tools and unrelated MCP/network/browser/email/deployment/subagent actions are not automatically covered; they need dedicated enforcement.
 - Guardian locks approved `event.input` against later `tool_call` handlers, but cannot observe command prefixes, spawn hooks, or a custom tool's internal behavior after dispatch.
-- Filesystem state may change between classification and execution.
+- Filesystem state may change between classification and execution; the parallel sibling case is an explicitly accepted risk documented under broad search handling.
 - Reviewer decisions are probabilistic.
 - A user-enabled temporary bypass intentionally removes Guardian classification, review, input locking, and circuit enforcement until it is re-enabled or automatically reset.
 - While Guardian is enabled, at least one distinct reviewer channel must be available; failure of the configured primary, configured fallback, and current-model fallback blocks covered actions.

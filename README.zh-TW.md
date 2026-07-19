@@ -86,7 +86,7 @@ Guardian 啟用時，受保護動作只有在 reviewer 回傳有效的 `outcome:
 ## Reviewer 行為
 
 - Reviewer 狀態使用獨立的 in-memory session；最後 fallback 可使用主 session 的 model identity，但不會重用主對話狀態。
-- 一般審核只提供 `read`、`grep`、`find`、`ls`。
+- 一般審核只提供 `read`、`grep`、`find`、`ls`；reviewer 專用 guard 會在執行前阻擋已判定為私密的 path 與 scope。
 - 私密資料授權審核完全不提供工具。
 - Reviewer 不會取得 `bash`、`write`、`edit`。
 - Transcript、檔案、tool output 與 planned action 都視為不可信 evidence。

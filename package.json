@@ -1,6 +1,6 @@
 {
   "name": "pi-approval-guardian",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "A fail-closed-by-default Pi approval gate that reviews shell actions, private data access, and sensitive file mutations with an isolated risk model and explicit temporary bypass.",
   "type": "module",
   "keywords": [
