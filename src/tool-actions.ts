@@ -8,6 +8,7 @@ import type { DirectoryScanCache } from "./directory-scan-cache.ts";
 import {
 	classifyMutationPath,
 	classifyReadPath,
+	directoryListingMayContainPrivatePath,
 	directoryMayContainPrivatePath,
 	shouldReviewPath,
 	type GuardianReviewResult,
@@ -164,14 +165,20 @@ function pathReadAction(
 	const privateSelector =
 		typeof selector === "string" && looksLikePrivateGlob(selector);
 	const privateScope =
-		directorySearchTool &&
-		directoryMayContainPrivatePath(
-			path,
-			cwd,
-			typeof selector === "string" ? selector : undefined,
-			10_000,
-			directoryScanCache,
-		);
+		tool === "ls"
+			? directoryListingMayContainPrivatePath(
+					path,
+					cwd,
+					typeof input.limit === "number" ? input.limit : undefined,
+				)
+			: directorySearchTool &&
+				directoryMayContainPrivatePath(
+					path,
+					cwd,
+					typeof selector === "string" ? selector : undefined,
+					10_000,
+					directoryScanCache,
+				);
 	if (!shouldReviewPath(level, target) && !privateSelector && !privateScope)
 		return;
 	return {

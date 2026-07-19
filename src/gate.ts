@@ -3,6 +3,7 @@ import {
 	readdirSync,
 	readlinkSync,
 	realpathSync,
+	statSync,
 	type Dirent,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -250,18 +251,10 @@ export function shouldReviewMutation(path: string, cwd: string): boolean {
 	return target.outsideProject || target.sensitive;
 }
 
-// The branches deliberately mirror independent blacklist categories for auditability.
-// pi-lens-ignore: high-complexity
-export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
-	const { absolutePath, projectRoot, windowsPath } = resolveGuardianPath(
-		path,
-		cwd,
-	);
-	const outsideProject = isOutsideProject(
-		absolutePath,
-		projectRoot,
-		windowsPath,
-	);
+function classifyAbsoluteReadPrivacy(absolutePath: string): {
+	private: boolean;
+	reasons: string[];
+} {
 	const normalizedSegments = absolutePath
 		.split(/[\\/]+/)
 		.filter(Boolean)
@@ -276,15 +269,38 @@ export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
 	);
 	const privateDirectory = isCommonPrivateDirectory(normalizedSegments);
 	const piPrivate = isPiPrivatePath(normalizedSegments, file);
-	const privatePath =
-		privateBasename || projectPrivateSegment || privateDirectory || piPrivate;
-	const reasons = [
-		...(privateBasename ? ["private file"] : []),
-		...(projectPrivateSegment ? ["private directory"] : []),
-		...(privateDirectory ? ["common private directory"] : []),
-		...(piPrivate ? ["private Pi data"] : []),
-	];
-	return { absolutePath, outsideProject, private: privatePath, reasons };
+	return {
+		private:
+			privateBasename ||
+			projectPrivateSegment ||
+			privateDirectory ||
+			piPrivate,
+		reasons: [
+			...(privateBasename ? ["private file"] : []),
+			...(projectPrivateSegment ? ["private directory"] : []),
+			...(privateDirectory ? ["common private directory"] : []),
+			...(piPrivate ? ["private Pi data"] : []),
+		],
+	};
+}
+
+// The branches deliberately mirror independent blacklist categories for auditability.
+// pi-lens-ignore: high-complexity
+export function classifyReadPath(path: string, cwd: string): ReadReviewTarget {
+	const { absolutePath, projectRoot, windowsPath } = resolveGuardianPath(
+		path,
+		cwd,
+	);
+	const outsideProject = isOutsideProject(
+		absolutePath,
+		projectRoot,
+		windowsPath,
+	);
+	return {
+		absolutePath,
+		outsideProject,
+		...classifyAbsoluteReadPrivacy(absolutePath),
+	};
 }
 
 export function shouldReviewPath(
@@ -313,6 +329,42 @@ const GREP_SCOPE_SKIP_DIRECTORIES = new Set([
 	"build",
 	"target",
 ]);
+
+export function directoryListingMayContainPrivatePath(
+	path: string,
+	cwd: string,
+	limit = 500,
+): boolean {
+	const root = classifyReadPath(path, cwd);
+	if (root.private || limit <= 0) return root.private;
+	try {
+		if (!statSync(root.absolutePath).isDirectory()) return root.private;
+	} catch {
+		return root.private;
+	}
+	let entries: string[];
+	try {
+		entries = readdirSync(root.absolutePath);
+	} catch {
+		return root.private;
+	}
+	entries.sort((left, right) =>
+		left.toLowerCase().localeCompare(right.toLowerCase()),
+	);
+	let visibleEntries = 0;
+	for (const entry of entries) {
+		if (visibleEntries >= limit) break;
+		const child = join(root.absolutePath, entry);
+		try {
+			statSync(child);
+		} catch {
+			continue;
+		}
+		visibleEntries++;
+		if (classifyAbsoluteReadPrivacy(child).private) return true;
+	}
+	return false;
+}
 
 export function directoryMayContainPrivatePath(
 	path: string,

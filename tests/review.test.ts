@@ -82,6 +82,10 @@ test("uses the current Guardian policy and read-only investigation rules", () =>
 	assert.match(GUARDIAN_POLICY, /read, grep, find, and ls tools/);
 	assert.match(
 		GUARDIAN_POLICY,
+		/investigation tools reject paths, selectors, and effective scopes classified as private/,
+	);
+	assert.match(
+		GUARDIAN_POLICY,
 		/Never mutate files or execute the planned action/,
 	);
 	assert.match(
