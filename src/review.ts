@@ -28,7 +28,11 @@ interface TranscriptEntry {
 }
 
 export type GuardianMessage =
-	| { role: "user"; content: string | Array<{ type: string; text?: string }> }
+	| {
+			role: "user";
+			content: string | Array<{ type: string; text?: string }>;
+			authorizationSource?: "direct" | "untrusted";
+	  }
 	| {
 			role: "assistant";
 			content: Array<{
@@ -204,12 +208,14 @@ export function parseGuardianAssessment(text: string): GuardianAssessment {
 
 function messageToEntries(message: GuardianMessage): TranscriptEntry[] {
 	switch (message.role) {
-		case "user":
+		case "user": {
+			const direct = message.authorizationSource === "direct";
 			return textContent(message.content).map((text) => ({
-				kind: "user",
-				role: "user",
+				kind: direct ? "user" : "assistant",
+				role: direct ? "direct user" : "untrusted user content",
 				text,
 			}));
+		}
 		case "assistant": {
 			const entries: TranscriptEntry[] = [];
 			for (const content of message.content) {

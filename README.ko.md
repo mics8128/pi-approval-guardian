@@ -65,7 +65,7 @@ Pi agent tool call
 
 Guardian이 enabled인 동안 protected action은 reviewer가 유효한 `outcome: "allow"`를 반환한 경우에만 실행됩니다. Deny, timeout, invalid output, auth/model/provider failure, cancel, circuit open은 모두 fail closed입니다.
 
-Private data access에는 user transcript의 명시적 승인과 reviewer의 `user_authorization: "high"`가 필요합니다.
+Private data access에는 Guardian이 캡처한 direct user input의 명시적 승인과 reviewer의 `user_authorization: "high"`가 필요합니다. Raw interactive/RPC input만 direct authorization을 설정할 수 있습니다. 확장된 skill/template body, extension이 주입한 user-role message, provenance marker가 없는 legacy message는 untrusted로 유지됩니다. Upgrade 후 또는 이전 session을 resume한 뒤에는 필요하면 정확한 private source를 새 direct message로 다시 승인하세요.
 
 ## Private data rules
 

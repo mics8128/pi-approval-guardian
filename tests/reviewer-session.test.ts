@@ -122,7 +122,13 @@ test("late provider completion after cancellation cannot affect the next review"
 	const abortController = new AbortController();
 	const firstReview = controller.review(
 		action,
-		[{ role: "user", content: "First request" }],
+		[
+			{
+				role: "user",
+				content: "First request",
+				authorizationSource: "direct",
+			},
+		],
 		abortController.signal,
 	);
 	await firstPromptStarted;
@@ -138,7 +144,11 @@ test("late provider completion after cancellation cannot affect the next review"
 	assert.equal(
 		(
 			await controller.review(action, [
-				{ role: "user", content: "Second request" },
+				{
+					role: "user",
+					content: "Second request",
+					authorizationSource: "direct",
+				},
 			])
 		).kind,
 		"allowed",
@@ -190,7 +200,11 @@ test("reuses a successful reviewer session with transcript deltas", async () => 
 		return session;
 	};
 	const action = { tool: "bash", cwd: "/repo", payload: { command: "echo ok" } };
-	const firstMessage = { role: "user" as const, content: "First request" };
+	const firstMessage = {
+		role: "user" as const,
+		content: "First request",
+		authorizationSource: "direct" as const,
+	};
 	assert.equal(
 		(await controller.review(action, [firstMessage])).kind,
 		"allowed",
@@ -199,7 +213,11 @@ test("reuses a successful reviewer session with transcript deltas", async () => 
 		(
 			await controller.review(action, [
 				firstMessage,
-				{ role: "user", content: "Second request" },
+				{
+					role: "user",
+					content: "Second request",
+					authorizationSource: "direct",
+				},
 			])
 		).kind,
 		"allowed",
@@ -268,10 +286,18 @@ test("serializes concurrent reviews within one controller", async () => {
 	};
 	const action = { tool: "bash", cwd: "/repo", payload: { command: "echo ok" } };
 	const first = controller.review(action, [
-		{ role: "user", content: "First request" },
+		{
+			role: "user",
+			content: "First request",
+			authorizationSource: "direct",
+		},
 	]);
 	const second = controller.review(action, [
-		{ role: "user", content: "Second request" },
+		{
+			role: "user",
+			content: "Second request",
+			authorizationSource: "direct",
+		},
 	]);
 	await firstEntered;
 	assert.equal(promptCount, 1);

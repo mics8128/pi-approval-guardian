@@ -65,7 +65,7 @@ Pi agent tool call
 
 Guardian 启用时，受保护动作只有在 reviewer 返回有效的 `outcome: "allow"` 后才会执行。Deny、timeout、无效输出、auth/model/provider failure、取消和 circuit open 全部 fail closed。
 
-私密数据还要求 user transcript 中已有明确授权，并且 reviewer 返回 `user_authorization: "high"`。
+私密数据还要求 Guardian 捕获的直接用户输入中已有明确授权，并且 reviewer 返回 `user_authorization: "high"`。只有原始 interactive/RPC 输入可建立直接授权；展开后的 skill/template 内容、extension 注入的 user-role 消息，以及没有 provenance marker 的旧消息都保持不可信。升级或恢复旧 session 后，如有需要请重新明确授权确切的私密来源。
 
 ## 私密数据规则
 

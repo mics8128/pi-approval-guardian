@@ -20,7 +20,7 @@ Primary checkpoints:
 
 ### Authorization provenance
 
-The current catalog template distinguishes direct user authority from assistant text, tool output, file content, and other untrusted evidence. The local adaptation now makes the same boundary explicit: only direct user messages establish authorization. A user can deliberately delegate implementation scope to a named file or ticket, but that source remains untrusted and cannot itself authorize private-data access, external egress, or unrelated risky side effects. Exact private-source authorization must appear in the direct user message.
+The current catalog template distinguishes direct user authority from assistant text, tool output, file content, and other untrusted evidence. The local adaptation now makes the same boundary explicit and enforces it with Pi's pre-expansion `input` provenance: only captured interactive or RPC input establishes authorization. Expanded skill/template bodies, extension-injected user-role messages, and unmarked legacy messages remain untrusted. A user can deliberately delegate implementation scope to a named file or ticket, but that source cannot itself authorize private-data access, external egress, or unrelated risky side effects. Exact private-source authorization must appear in the captured direct input.
 
 This reduces prompt-injection authority without treating ordinary implementation details from files or tools as malicious by default.
 

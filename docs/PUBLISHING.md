@@ -27,7 +27,7 @@ Official references:
 - `extensions/`
 - `src/`
 - `README.md` and localized `README.*.md` files
-- `docs/PUBLISHING.md` and `docs/REFERENCE.md`
+- `docs/PUBLISHING.md`, `docs/REFERENCE.md`, and `docs/UPSTREAM-GUARDIAN-RESEARCH.md`
 - MIT `LICENSE`
 - `LICENSES/Apache-2.0.txt` and `NOTICE` for adapted OpenAI Codex Guardian materials
 - npm-required package metadata

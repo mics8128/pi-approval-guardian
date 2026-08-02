@@ -210,11 +210,13 @@ Normal reviews provide only:
 read · grep · find · ls
 ```
 
-Private-data reviews provide no investigation tools. Authorization must be decided from the existing user transcript and planned-action metadata.
+Private-data reviews provide no investigation tools. Authorization must be decided from captured direct-user transcript entries; planned-action metadata only identifies the exact private source and scope.
 
 The reviewer never receives `bash`, `write`, or `edit`, and it loads no extensions, skills, prompt templates, themes, or project context files. Its normal investigation tools are reviewer-only wrappers that deterministically reject paths, selectors, and effective scopes classified as private before delegating to Pi's built-in read-only implementations. This containment uses the same heuristic path rules as the main gate and retains their documented limits.
 
-Only direct user messages establish authorization. Assistant text, tool output, file content, summaries, retry reasons, and planned actions remain untrusted evidence and cannot independently expand authorization. A direct user may delegate relevant implementation scope to a named file or ticket, but that source remains untrusted and cannot itself authorize private-data access, external egress, or unrelated risky side effects. Delegated content never satisfies the exact-private-source requirement.
+Only raw interactive or RPC input captured by Guardian establishes direct-user authorization. Guardian observes Pi's pre-expansion `input` event, correlates it with the emitted user message, and stores a versioned provenance marker as a custom session entry that does not enter model context. When a skill, prompt template, or input transform changes the text, the reviewer receives the raw invocation as `direct user` and the expanded body separately as `untrusted user content`.
+
+Assistant text, tool output, file content, summaries, retry reasons, planned actions, extension-injected user-role messages, and user-role messages without a valid provenance marker remain untrusted evidence and cannot independently expand authorization. This includes messages from sessions created before provenance capture was available; after upgrading or resuming such a session, repeat an exact private-source authorization in a new direct message. A direct user may delegate relevant implementation scope to a named file or ticket, but that source remains untrusted and cannot itself authorize private-data access, external egress, or unrelated risky side effects. Delegated content never satisfies the exact-private-source requirement.
 
 Reviewer read-only restrictions apply only to the reviewer and do not imply that an allowed Pi action is read-only or sandboxed. Investigation tools are used only when a missing local fact could materially change allow/deny.
 
@@ -245,7 +247,7 @@ Authorized private-read output is not redacted.
 | Blocked-result reviewer/provider detail | 4,000 characters |
 | Recent non-user entries | 40 |
 
-Selection prioritizes the first and latest user intent, other user messages that fit, and recent assistant/tool evidence. Long entries use marked middle truncation. Reviewer rationale and provider-failure detail are whitespace-normalized and end-truncated before being returned to the main agent; fixed fail-closed and no-workaround guidance remains outside that bounded detail.
+Selection prioritizes the first and latest captured direct-user intent, other direct-user messages that fit, and recent untrusted/assistant/tool evidence. Long entries use marked middle truncation. Reviewer rationale and provider-failure detail are whitespace-normalized and end-truncated before being returned to the main agent; fixed fail-closed and no-workaround guidance remains outside that bounded detail.
 
 ## Session reuse
 

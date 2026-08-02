@@ -3,6 +3,11 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+	collectGuardianMessages,
+	DIRECT_USER_INPUT_ENTRY_TYPE,
+	DirectUserInputTracker,
+} from "../src/authorization-provenance.ts";
 import { loadGuardianConfig, type GuardianConfig } from "../src/config.ts";
 import { DirectoryScanCache } from "../src/directory-scan-cache.ts";
 import {
@@ -24,7 +29,7 @@ import {
 	showGuardianConfiguration,
 	syncGuardianRuntimeHealth,
 } from "../src/guardian-status.ts";
-import type { GuardianAction, GuardianMessage } from "../src/review.ts";
+import type { GuardianAction } from "../src/review.ts";
 import {
 	buildReviewerChannels,
 	modelSpecFor,
@@ -61,13 +66,6 @@ export {
 	lockReviewedToolInput,
 } from "../src/tool-input-lock.ts";
 
-function collectBranchMessages(ctx: ExtensionContext): GuardianMessage[] {
-	return ctx.sessionManager.getBranch().flatMap((entry) => {
-		if (entry.type !== "message") return [];
-		return [entry.message as GuardianMessage];
-	});
-}
-
 export interface ApprovalGuardianOptions {
 	directoryScanCache?: DirectoryScanCache;
 }
@@ -91,6 +89,7 @@ export default function approvalGuardian(
 	const reviewBatches = new ReviewBatchTracker();
 	const directoryScanCache =
 		options.directoryScanCache ?? new DirectoryScanCache();
+	const directUserInputTracker = new DirectUserInputTracker();
 
 	const showBypassWarning = (ctx: ExtensionContext) => {
 		ctx.ui.setWidget(
@@ -123,6 +122,7 @@ export default function approvalGuardian(
 		circuitBreaker.reset();
 		reviewBatches.reset();
 		directoryScanCache.clear();
+		directUserInputTracker.reset();
 	};
 
 	const syncConfigurationWarnings = (
@@ -181,12 +181,21 @@ export default function approvalGuardian(
 		resetRuntime();
 		clearBypassWarning(ctx);
 	});
-	pi.on("before_agent_start", () => {
+	pi.on("input", (event) => {
+		directUserInputTracker.observe(event);
+	});
+	pi.on("before_agent_start", (event) => {
+		directUserInputTracker.confirmPrompt(event.prompt);
 		// Temporary bypass is intentionally UI/control-plane state only. Do not
 		// inject it into model context or treat it as additional authorization.
 		circuitBreaker.reset();
 		reviewBatches.reset();
 		directoryScanCache.clear();
+	});
+	pi.on("message_start", (event) => {
+		if (event.message.role !== "user") return;
+		const record = directUserInputTracker.recordForMessage(event.message);
+		if (record) pi.appendEntry(DIRECT_USER_INPUT_ENTRY_TYPE, record);
 	});
 
 	const setTemporaryBypass = async (
@@ -470,7 +479,11 @@ export default function approvalGuardian(
 				});
 				controllers.set(key, controller);
 			}
-			return controller.review(action, collectBranchMessages(ctx), ctx.signal);
+			return controller.review(
+				action,
+				collectGuardianMessages(ctx.sessionManager.getBranch()),
+				ctx.signal,
+			);
 		} catch (error) {
 			return {
 				kind: "failure",
