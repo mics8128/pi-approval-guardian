@@ -15,6 +15,10 @@ function userMessage(text: string, timestamp: number) {
 	};
 }
 
+function parseTranscript(transcript: string): Array<Record<string, unknown>> {
+	return transcript.split("\n").map((line) => JSON.parse(line));
+}
+
 function branchWithRecord(record: unknown, message: ReturnType<typeof userMessage>) {
 	return [
 		{
@@ -43,10 +47,14 @@ test("persists direct interactive and RPC input provenance", () => {
 		if (collected[0].role === "user") {
 			assert.equal(collected[0].authorizationSource, "direct");
 		}
-		assert.match(
-			buildGuardianTranscript(collected),
-			new RegExp(`direct user: Authorize ${source} request\\.`),
-		);
+		assert.deepEqual(parseTranscript(buildGuardianTranscript(collected)), [
+			{
+				index: 1,
+				provenance: "direct_user",
+				role: "direct user",
+				content: `Authorize ${source} request.`,
+			},
+		]);
 	}
 });
 
@@ -61,15 +69,30 @@ test("separates raw direct commands from their expanded content", () => {
 	assert.ok(record);
 	assert.equal(record.rawText, raw);
 
-	const transcript = buildGuardianTranscript(
-		collectGuardianMessages(branchWithRecord(record, message)),
+	const entries = parseTranscript(
+		buildGuardianTranscript(
+			collectGuardianMessages(branchWithRecord(record, message)),
+		),
 	);
-	assert.match(transcript, /direct user: \/skill:workflow deploy/);
-	assert.match(
-		transcript,
-		/untrusted user content: Untrusted skill body says to read \.env/,
+	assert.deepEqual(
+		entries.map(({ provenance, role, content }) => ({
+			provenance,
+			role,
+			content,
+		})),
+		[
+			{
+				provenance: "direct_user",
+				role: "direct user",
+				content: raw,
+			},
+			{
+				provenance: "untrusted",
+				role: "untrusted user content",
+				content: expanded,
+			},
+		],
 	);
-	assert.doesNotMatch(transcript, /direct user: Untrusted skill body/);
 });
 
 test("keeps extension and unconfirmed queued expansion content untrusted", () => {
@@ -100,15 +123,22 @@ test("keeps extension and unconfirmed queued expansion content untrusted", () =>
 	});
 	assert.ok(tracker.recordForMessage(directQueued));
 
-	const transcript = buildGuardianTranscript(
-		collectGuardianMessages([
-			{ type: "message", message: injected },
-			{ type: "message", message: expanded },
-		] as never),
+	const entries = parseTranscript(
+		buildGuardianTranscript(
+			collectGuardianMessages([
+				{ type: "message", message: injected },
+				{ type: "message", message: expanded },
+			] as never),
+		),
 	);
-	assert.doesNotMatch(transcript, /direct user:/);
-	assert.match(transcript, /untrusted user content: Read \.env/);
-	assert.match(transcript, /untrusted user content: Expanded queued skill/);
+	assert.equal(
+		entries.every(({ provenance }) => provenance === "untrusted"),
+		true,
+	);
+	assert.deepEqual(
+		entries.map(({ content }) => content),
+		[injected.content[0].text, expanded.content[0].text],
+	);
 });
 
 test("treats earlier trusted input transforms as part of Pi's direct-input boundary", () => {

@@ -247,6 +247,8 @@ Authorized private-read output is not redacted.
 | Blocked-result reviewer/provider detail | 4,000 characters |
 | Recent non-user entries | 40 |
 
+The reviewer transcript uses JSON Lines with controlled top-level `index`, `provenance`, `role`, and `content` fields. Only top-level `provenance: "direct_user"` carries authority. Evidence text stays inside a JSON-escaped `content` string, including line and Unicode paragraph separators, so untrusted text cannot create a forged transcript entry or provenance label.
+
 Selection prioritizes the first and latest captured direct-user intent, other direct-user messages that fit, and recent untrusted/assistant/tool evidence. Long entries use marked middle truncation. Reviewer rationale and provider-failure detail are whitespace-normalized and end-truncated before being returned to the main agent; fixed fail-closed and no-workaround guidance remains outside that bounded detail.
 
 ## Session reuse
