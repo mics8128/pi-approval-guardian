@@ -65,7 +65,7 @@ Pi agent tool call
 
 While Guardian is enabled, only a valid reviewer response with `outcome: "allow"` permits a covered action to execute. Denials, timeouts, invalid output, missing authentication, provider failures, cancellation, and an open circuit all fail closed.
 
-Private-data access additionally requires explicit authorization in captured direct-user input and reviewer `user_authorization: "high"`. Only raw interactive or RPC input counts as direct authorization; expanded skill/template bodies, extension-injected user-role messages, and unmarked legacy messages remain untrusted. After upgrading or resuming an older session, repeat the exact private-source authorization if needed. The reviewer cannot inspect the pending private target while deciding whether access is authorized.
+Private-data access additionally requires explicit authorization in captured direct-user input and reviewer `user_authorization: "high"`. Only input Pi reports to Guardian as interactive or RPC counts as direct authorization; expanded skill/template bodies, extension-injected user-role messages, and unmarked legacy messages remain untrusted. Earlier-loaded input-transform extensions are inside Pi's trusted extension boundary because extensions already run with full system permissions. After upgrading or resuming an older session, repeat the exact private-source authorization if needed. The reviewer cannot inspect the pending private target while deciding whether access is authorized.
 
 ## Private-data rules
 

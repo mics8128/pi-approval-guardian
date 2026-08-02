@@ -20,7 +20,7 @@ Primary checkpoints:
 
 ### Authorization provenance
 
-The current catalog template distinguishes direct user authority from assistant text, tool output, file content, and other untrusted evidence. The local adaptation now makes the same boundary explicit and enforces it with Pi's pre-expansion `input` provenance: only captured interactive or RPC input establishes authorization. Expanded skill/template bodies, extension-injected user-role messages, and unmarked legacy messages remain untrusted. A user can deliberately delegate implementation scope to a named file or ticket, but that source cannot itself authorize private-data access, external egress, or unrelated risky side effects. Exact private-source authorization must appear in the captured direct input.
+The current catalog template distinguishes direct user authority from assistant text, tool output, file content, and other untrusted evidence. The local adaptation makes the same boundary explicit and enforces it with Pi's pre-expansion `input` source: only input Pi reports as interactive or RPC establishes authorization. Expanded skill/template bodies, extension-injected user-role messages, later input transforms, and unmarked legacy messages remain untrusted. Earlier-loaded input transformers are part of Pi's trusted-extension control plane because Pi does not expose immutable original text or its transform chain. A user can deliberately delegate implementation scope to a named file or ticket, but that source cannot itself authorize private-data access, external egress, or unrelated risky side effects. Exact private-source authorization must appear in the captured direct input.
 
 This reduces prompt-injection authority without treating ordinary implementation details from files or tools as malicious by default.
 
@@ -80,7 +80,7 @@ The local policy stays package-controlled and reviewable. Dynamically importing 
 
 ### Plugin attribution and visible tool-call IDs
 
-[PR #35029](https://github.com/openai/codex/pull/35029) propagates runtime-validated plugin attribution. Pi's current extension event does not expose equivalent verified provenance, so command text or paths must not be treated as origin evidence.
+[PR #35029](https://github.com/openai/codex/pull/35029) propagates runtime-validated plugin attribution. Pi's current `tool_call` event does not expose equivalent runtime-validated plugin provenance, so command text or paths must not be treated as plugin-origin evidence.
 
 Pi does expose an opaque `toolCallId`, but displaying it would not reproduce Codex's owner-scoped approval machinery: each Pi hook is already awaited for its exact event and this package has no approval cache. Adding IDs to every notification or denial would add noise without a proportional safety gain, so it is deferred.
 

@@ -86,8 +86,13 @@ test("keeps extension and unconfirmed queued expansion content untrusted", () =>
 		streamingBehavior: "steer",
 	});
 	assert.equal(tracker.recordForMessage(expanded), undefined);
+	assert.equal(
+		tracker.recordForMessage(userMessage("/skill:workflow", 32)),
+		undefined,
+		"an unmatched queued command must not authorize a later text collision",
+	);
 
-	const directQueued = userMessage("Directly authorize reading .env.", 32);
+	const directQueued = userMessage("Directly authorize reading .env.", 33);
 	tracker.observe({
 		text: directQueued.content[0].text,
 		source: "interactive",
@@ -104,4 +109,12 @@ test("keeps extension and unconfirmed queued expansion content untrusted", () =>
 	assert.doesNotMatch(transcript, /direct user:/);
 	assert.match(transcript, /untrusted user content: Read \.env/);
 	assert.match(transcript, /untrusted user content: Expanded queued skill/);
+});
+
+test("treats earlier trusted input transforms as part of Pi's direct-input boundary", () => {
+	const tracker = new DirectUserInputTracker();
+	const transformed = userMessage("Trusted transformer output.", 40);
+	tracker.observe({ text: transformed.content[0].text, source: "interactive" });
+	tracker.confirmPrompt(transformed.content[0].text);
+	assert.ok(tracker.recordForMessage(transformed));
 });

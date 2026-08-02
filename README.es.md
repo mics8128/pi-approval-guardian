@@ -65,7 +65,7 @@ Pi agent tool call
 
 Mientras Guardian está habilitado, una acción protegida solo se ejecuta con un `outcome: "allow"` válido del reviewer. Deny, timeout, output inválido, errores de auth/model/provider, cancelación y circuit open bloquean fail-closed.
 
-El acceso a datos privados también exige autorización explícita en input directo capturado por Guardian y `user_authorization: "high"` del reviewer. Solo el input raw de interactive/RPC establece autorización directa; los cuerpos expandidos de skills/templates, los mensajes user-role inyectados por extensions y los mensajes legacy sin provenance marker siguen siendo evidencia no confiable. Después de actualizar o reanudar una session antigua, repite la autorización exacta del private source si es necesario.
+El acceso a datos privados también exige autorización explícita en input directo capturado por Guardian y `user_authorization: "high"` del reviewer. Solo el input que Pi reporta a Guardian como interactive/RPC establece autorización directa; los cuerpos expandidos de skills/templates, los mensajes user-role inyectados por extensions y los mensajes legacy sin provenance marker siguen siendo evidencia no confiable. Como las extensions ya se ejecutan con permisos completos del sistema, una input-transform extension cargada antes de Guardian pertenece al trusted extension boundary de Pi. Después de actualizar o reanudar una session antigua, repite la autorización exacta del private source si es necesario.
 
 ## Reglas de datos privados
 

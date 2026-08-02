@@ -78,13 +78,24 @@ export class DirectUserInputTracker {
 		} else {
 			// Queued steering/follow-up messages do not emit before_agent_start.
 			// Trust only an exact raw-to-stored match in that path; expanded skill or
-			// template content remains untrusted.
-			const pendingIndex = this.pending.findIndex(
+			// template content remains untrusted. Prefer the latest exact observation
+			// so a newer extension-source message cannot inherit an older direct one.
+			const pendingIndex = findLastIndex(
+				this.pending,
 				(candidate) => candidate.text === expandedText,
 			);
 			if (pendingIndex >= 0) {
 				input = this.pending[pendingIndex];
 				this.pending.splice(0, pendingIndex + 1);
+			} else {
+				// An expanded queued message cannot be correlated safely. Quarantine all
+				// queued observations through the latest candidate so none can authorize
+				// a later message that happens to equal the original command text.
+				const queuedIndex = findLastIndex(
+					this.pending,
+					(candidate) => candidate.streamingBehavior !== undefined,
+				);
+				if (queuedIndex >= 0) this.pending.splice(0, queuedIndex + 1);
 			}
 		}
 
