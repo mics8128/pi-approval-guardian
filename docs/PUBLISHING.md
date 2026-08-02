@@ -74,7 +74,9 @@ Use semantic versioning:
 
 - **patch**: compatible bug or documentation fix
 - **minor**: compatible feature, new guarded action, or new configuration option
-- **major**: breaking configuration, behavior, package, or compatibility change
+- **major**: breaking configuration, behavior, package, or compatibility change after `1.0.0`
+
+Before `1.0.0`, increment the minor version for an intentional compatibility change and document the migration. A narrowly scoped fail-closed security correction that rejects behavior outside the documented authorization contract may also ship in such a minor release. For example, `0.8.0` requires a new direct message when an older session lacks trustworthy input-provenance markers; configuration and the supported Pi peer range remain compatible.
 
 Prepare the version on a release branch:
 

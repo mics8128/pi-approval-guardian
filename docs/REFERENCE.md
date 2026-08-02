@@ -241,13 +241,15 @@ Authorized private-read output is not redacted.
 | --- | ---: |
 | Message transcript | 40,000 characters |
 | Tool transcript | 40,000 characters |
-| Single message | 8,000 characters |
-| Single tool entry | 4,000 characters |
-| Planned action | 64,000 characters |
+| Single message content before encoded-line fitting | 8,000 characters |
+| Single tool-entry content before encoded-line fitting | 4,000 characters |
+| Final serialized planned-action envelope | 64,000 characters |
 | Blocked-result reviewer/provider detail | 4,000 characters |
 | Recent non-user entries | 40 |
 
-The reviewer transcript uses JSON Lines with controlled top-level `index`, `provenance`, `role`, and `content` fields. Only top-level `provenance: "direct_user"` carries authority. Evidence text stays inside a JSON-escaped `content` string, including line and Unicode paragraph separators, so untrusted text cannot create a forged transcript entry or provenance label.
+The reviewer transcript uses JSON Lines with controlled top-level `index`, `provenance`, `role`, and `content` fields. Only top-level `provenance: "direct_user"` carries authority. Evidence text stays inside a JSON-escaped `content` string, including line and Unicode paragraph separators, so untrusted text cannot create a forged transcript entry or provenance label. Encoded lines are fitted to their total transcript budget after escaping, so control-heavy direct input is truncated rather than omitted solely because its JSON representation expanded.
+
+The planned action is compact, separator-escaped JSON. The 64,000-character limit applies to that final serialized envelope rather than the pre-escaped payload; oversized payloads are middle-truncated inside an explicit `truncated` marker object.
 
 Selection prioritizes the first and latest captured direct-user intent, other direct-user messages that fit, and recent untrusted/assistant/tool evidence. Long entries use marked middle truncation. Reviewer rationale and provider-failure detail are whitespace-normalized and end-truncated before being returned to the main agent; fixed fail-closed and no-workaround guidance remains outside that bounded detail.
 

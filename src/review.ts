@@ -8,6 +8,7 @@ const TOOL_TRANSCRIPT_CHARS = 40_000;
 const MESSAGE_ENTRY_CHARS = 8_000;
 const TOOL_ENTRY_CHARS = 4_000;
 const ACTION_CHARS = 64_000;
+const ACTION_FIELD_CHARS = 2_048;
 const RECENT_NON_USER_LIMIT = 40;
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -83,7 +84,7 @@ export function parseModelSpec(
 export function buildGuardianPrompt(request: GuardianRequest): string {
 	const mode = request.mode ?? "full";
 	const delta = mode === "delta";
-	const action = truncateAction(request.action);
+	const actionJson = renderActionJson(request.action);
 	const retry = request.retryReason
 		? `Retry context JSON:\n${stringifyJsonLine({ reason: request.retryReason })}\n\n`
 		: "";
@@ -97,7 +98,7 @@ The Pi agent has requested the following ${delta ? "next " : ""}action:
 >>> APPROVAL REQUEST START
 ${retry}Assess the exact planned action below. Use read-only tool checks when local state matters.
 Planned action JSON:
-${JSON.stringify(action, null, 2)}
+${actionJson}
 >>> APPROVAL REQUEST END`;
 }
 
@@ -107,16 +108,83 @@ function stringifyJsonLine(value: unknown): string {
 		.replace(/\u2029/g, "\\u2029");
 }
 
-function truncateAction(action: GuardianAction): GuardianAction {
-	const serialized = JSON.stringify(action.payload);
-	if (serialized.length <= ACTION_CHARS) return action;
-	return {
-		...action,
+function renderActionJson(action: GuardianAction): string {
+	const full = stringifyJsonLine(action);
+	if (full.length <= ACTION_CHARS) return full;
+
+	const serializedPayload = JSON.stringify(action.payload);
+	const base = {
+		tool: truncateMiddle(action.tool, ACTION_FIELD_CHARS, "guardian_action_tool"),
+		cwd: truncateMiddle(action.cwd, ACTION_FIELD_CHARS, "guardian_action_cwd"),
 		payload: {
 			truncated: true,
-			serialized: truncateMiddle(serialized, ACTION_CHARS, "guardian_action"),
+			original_chars: serializedPayload.length,
+			serialized: "",
 		},
 	};
+	let best = stringifyJsonLine(base);
+	let low = 1;
+	let high = serializedPayload.length;
+	while (low <= high) {
+		const mid = Math.floor((low + high) / 2);
+		const candidate = stringifyJsonLine({
+			...base,
+			payload: {
+				...base.payload,
+				serialized: truncateMiddle(
+					serializedPayload,
+					mid,
+					"guardian_action",
+				),
+			},
+		});
+		if (candidate.length <= ACTION_CHARS) {
+			best = candidate;
+			low = mid + 1;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return best;
+}
+
+function renderTranscriptEntry(entry: TranscriptEntry, index: number): string {
+	const contentCap =
+		entry.kind === "tool" ? TOOL_ENTRY_CHARS : MESSAGE_ENTRY_CHARS;
+	const lineCap =
+		entry.kind === "tool" ? TOOL_TRANSCRIPT_CHARS : MESSAGE_TRANSCRIPT_CHARS;
+	const role = truncateMiddle(entry.role, 512, "guardian_role");
+	const render = (content: string) =>
+		stringifyJsonLine({
+			index: index + 1,
+			provenance: entry.kind === "user" ? "direct_user" : "untrusted",
+			role,
+			content,
+		});
+	const boundedContent = truncateMiddle(
+		entry.text,
+		contentCap,
+		"guardian_entry",
+	);
+	const full = render(boundedContent);
+	if (full.length <= lineCap) return full;
+
+	let best = render("");
+	let low = 1;
+	let high = Math.min(entry.text.length, contentCap);
+	while (low <= high) {
+		const mid = Math.floor((low + high) / 2);
+		const candidate = render(
+			truncateMiddle(entry.text, mid, "guardian_entry"),
+		);
+		if (candidate.length <= lineCap) {
+			best = candidate;
+			low = mid + 1;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return best;
 }
 
 export function buildGuardianTranscript(messages: GuardianMessage[]): string {
@@ -126,15 +194,9 @@ export function buildGuardianTranscript(messages: GuardianMessage[]): string {
 	const included = new Set<number>();
 	let messageChars = 0;
 	let toolChars = 0;
-	const rendered = entries.map((entry, index) => {
-		const cap = entry.kind === "tool" ? TOOL_ENTRY_CHARS : MESSAGE_ENTRY_CHARS;
-		return stringifyJsonLine({
-			index: index + 1,
-			provenance: entry.kind === "user" ? "direct_user" : "untrusted",
-			role: entry.role,
-			content: truncateMiddle(entry.text, cap, "guardian_entry"),
-		});
-	});
+	const rendered = entries.map((entry, index) =>
+		renderTranscriptEntry(entry, index),
+	);
 	const userIndices = entries.flatMap((entry, index) =>
 		entry.kind === "user" ? [index] : [],
 	);
