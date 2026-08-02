@@ -11,7 +11,10 @@ import {
 	circuitOutcomeForReview,
 	type GuardianReviewResult,
 } from "../src/gate.ts";
-import { buildGuardianSystemPrompt } from "../src/policy.ts";
+import {
+	buildGuardianSystemPrompt,
+	buildPrivateDataReviewSystemPrompt,
+} from "../src/policy.ts";
 import {
 	formatReviewResult,
 	rejectionReason,
@@ -433,7 +436,7 @@ export default function approvalGuardian(
 			const privateDataReview = action.payload.private_data_read === true;
 			const baseSystemPrompt = buildGuardianSystemPrompt(config.policy);
 			const systemPrompt = privateDataReview
-				? `${baseSystemPrompt}\n\n# Private Data Review Restriction\nNo investigation tools are available for this review. Decide authorization only from the user transcript and planned-action metadata; deny if explicit authorization is not established.`
+				? buildPrivateDataReviewSystemPrompt(baseSystemPrompt)
 				: baseSystemPrompt;
 			const reviewerTools = reviewerToolsForAction(action);
 			const nextContextKey = JSON.stringify({

@@ -47,6 +47,110 @@ test("prompt cancellation returns fail closed immediately", async () => {
 	assert.equal(aborted, 1);
 });
 
+test("late provider completion after cancellation cannot affect the next review", async () => {
+	type FakeSession = {
+		messages: Array<{
+			role: "assistant";
+			stopReason: "stop";
+			content: Array<{ type: "text"; text: string }>;
+		}>;
+		isStreaming: boolean;
+		prompt: (prompt: string) => Promise<void>;
+		abort: () => Promise<void>;
+		dispose: () => void;
+	};
+	let firstPromptStartedResolve!: () => void;
+	let releaseFirstPrompt!: () => void;
+	const firstPromptStarted = new Promise<void>((resolve) => {
+		firstPromptStartedResolve = resolve;
+	});
+	const firstPromptRelease = new Promise<void>((resolve) => {
+		releaseFirstPrompt = resolve;
+	});
+	let firstDisposed = 0;
+	const firstSession: FakeSession = {
+		messages: [],
+		isStreaming: false,
+		prompt: async () => {
+			firstPromptStartedResolve();
+			await firstPromptRelease;
+			firstSession.messages.push({
+				role: "assistant",
+				stopReason: "stop",
+				content: [{ type: "text", text: '{"outcome":"allow"}' }],
+			});
+		},
+		abort: async () => undefined,
+		dispose: () => {
+			firstDisposed++;
+		},
+	};
+	const secondPrompts: string[] = [];
+	const secondSession: FakeSession = {
+		messages: [],
+		isStreaming: false,
+		prompt: async (prompt) => {
+			secondPrompts.push(prompt);
+			secondSession.messages.push({
+				role: "assistant",
+				stopReason: "stop",
+				content: [{ type: "text", text: '{"outcome":"allow"}' }],
+			});
+		},
+		abort: async () => undefined,
+		dispose: () => undefined,
+	};
+	const controller = new ReviewerSessionController({
+		model: { provider: "test", id: "reviewer" } as never,
+		modelRegistry: {} as never,
+		cwd: "/repo",
+		systemPrompt: "Review safely.",
+		timeoutMs: 1_000,
+	});
+	const sessions = [firstSession, secondSession];
+	const internals = controller as unknown as {
+		session?: FakeSession;
+		getSession: () => Promise<FakeSession>;
+	};
+	internals.getSession = async () => {
+		const session = sessions.shift();
+		assert.ok(session);
+		internals.session = session;
+		return session;
+	};
+	const action = { tool: "bash", cwd: "/repo", payload: { command: "echo ok" } };
+	const abortController = new AbortController();
+	const firstReview = controller.review(
+		action,
+		[{ role: "user", content: "First request" }],
+		abortController.signal,
+	);
+	await firstPromptStarted;
+	abortController.abort();
+	assert.deepEqual(await firstReview, {
+		kind: "cancelled",
+		message: "Guardian review was cancelled.",
+	});
+	assert.equal(firstDisposed, 1);
+
+	releaseFirstPrompt();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(
+		(
+			await controller.review(action, [
+				{ role: "user", content: "Second request" },
+			])
+		).kind,
+		"allowed",
+	);
+	assert.equal(secondPrompts.length, 1);
+	assert.match(secondPrompts[0], /TRANSCRIPT START/);
+	assert.doesNotMatch(secondPrompts[0], /TRANSCRIPT DELTA START/);
+	assert.match(secondPrompts[0], /Second request/);
+	assert.doesNotMatch(secondPrompts[0], /First request/);
+	controller.dispose();
+});
+
 test("reuses a successful reviewer session with transcript deltas", async () => {
 	const prompts: string[] = [];
 	let disposed = 0;

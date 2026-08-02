@@ -4,6 +4,8 @@ import type {
 } from "./review.ts";
 import type { GuardianReviewResult } from "./gate.ts";
 
+const REJECTION_DETAIL_CHARS = 4_000;
+
 export function rejectionReason(
 	result: Exclude<GuardianReviewResult, { kind: "allowed" }>,
 ): string {
@@ -11,13 +13,13 @@ export function rejectionReason(
 		case "denied":
 			return [
 				"This action was rejected due to unacceptable risk.",
-				`Reason: ${result.assessment.rationale}`,
+				`Reason: ${boundedRejectionDetail(result.assessment.rationale)}`,
 				"Do not attempt the same outcome through a workaround, indirect execution, or policy circumvention. Proceed only with a materially safer alternative or after the user explicitly approves the exact action after being informed of the risk.",
 			].join("\n");
 		case "timeout":
 			return "Automatic permission review reached its deadline without approval. Do not assume approval; retry later or ask the user for guidance.";
 		case "failure":
-			return `Automatic permission review failed closed, so approval was not granted. ${result.message}`;
+			return `Automatic permission review failed closed, so approval was not granted. ${boundedRejectionDetail(result.message)}`;
 		case "cancelled":
 			return "Automatic permission review was cancelled, so approval was not granted.";
 		case "circuit-open":
@@ -77,6 +79,10 @@ export function reviewResultDiagnostic(result: GuardianReviewResult): string {
 
 export function formatDuration(timeoutMs: number): string {
 	return timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}s` : `${timeoutMs}ms`;
+}
+
+function boundedRejectionDetail(value: string): string {
+	return truncate(singleLine(value), REJECTION_DETAIL_CHARS);
 }
 
 function singleLine(value: string): string {
