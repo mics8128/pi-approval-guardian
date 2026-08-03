@@ -18,6 +18,8 @@ const TRANSCRIPT_NOTICE = stringifyJsonLine({
 });
 const MESSAGE_SELECTION_CHARS =
 	MESSAGE_TRANSCRIPT_CHARS - (TRANSCRIPT_NOTICE.length + 1);
+const TOOL_SELECTION_CHARS =
+	TOOL_TRANSCRIPT_CHARS - (TRANSCRIPT_NOTICE.length + 1);
 const MESSAGE_ENTRY_ENCODED_CHARS =
 	Math.floor(MESSAGE_SELECTION_CHARS / 2) - 1;
 
@@ -186,7 +188,7 @@ function renderTranscriptEntry(entry: TranscriptEntry, index: number): string {
 		entry.kind === "tool" ? TOOL_ENTRY_CHARS : MESSAGE_ENTRY_CHARS;
 	const lineCap =
 		entry.kind === "tool"
-			? TOOL_TRANSCRIPT_CHARS - 1
+			? TOOL_SELECTION_CHARS - 1
 			: MESSAGE_ENTRY_ENCODED_CHARS;
 	const role = truncateMiddle(entry.role, 512, "guardian_role");
 	const render = (content: string) =>
@@ -257,7 +259,7 @@ export function buildGuardianTranscript(messages: GuardianMessage[]): string {
 		if (entries[index].kind === "user" || included.has(index)) continue;
 		const size = rendered[index].length + 1;
 		if (entries[index].kind === "tool") {
-			if (toolChars + size > TOOL_TRANSCRIPT_CHARS) continue;
+			if (toolChars + size > TOOL_SELECTION_CHARS) continue;
 			toolChars += size;
 		} else {
 			if (messageChars + size > MESSAGE_SELECTION_CHARS) continue;
