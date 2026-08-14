@@ -1,0 +1,51 @@
+{
+  "name": "prime-approval-guardian",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "description": "A fail-closed Prime Agent whole-cell IPython approval gate with an isolated real reviewer.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "prime-agent",
+    "prime-agent-extension",
+    "approval-gate",
+    "guardian",
+    "risk-review"
+  ],
+  "license": "MIT",
+  "author": "mics8128",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mics8128/pi-approval-guardian.git"
+  },
+  "engines": {
+    "node": ">=22.8.0"
+  },
+  "primeAgent": {
+    "compatibility": ">=0.7.2 <0.8.0"
+  },
+  "files": [
+    "extensions",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "LICENSES/Apache-2.0.txt"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": ">=0.80.7 <0.81.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

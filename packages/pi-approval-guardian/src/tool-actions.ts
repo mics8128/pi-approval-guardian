@@ -11,7 +11,6 @@ import {
 	directoryListingMayContainPrivatePath,
 	directoryMayContainPrivatePath,
 	shouldReviewPath,
-	type GuardianReviewResult,
 } from "./gate.ts";
 import type { GuardianAction } from "./review.ts";
 import {
@@ -205,39 +204,6 @@ function shouldReviewMutationTarget(
 	return false;
 }
 
-export function enforceActionRequirements(
-	action: GuardianAction,
-	result: GuardianReviewResult,
-): GuardianReviewResult {
-	if (result.kind !== "allowed") return result;
-	const { risk_level: risk, user_authorization: authorization } =
-		result.assessment;
-	let rationale: string | undefined;
-	if (risk === "critical") {
-		rationale = "Critical-risk actions cannot be automatically approved.";
-	} else if (
-		risk === "high" &&
-		(authorization === "unknown" || authorization === "low")
-	) {
-		rationale =
-			"High-risk actions require at least medium user authorization.";
-	} else if (
-		action.payload.private_data_read === true &&
-		authorization !== "high"
-	) {
-		rationale =
-			"The private-data read lacks explicit high user authorization. Explain the exact source and purpose, then wait for the user to authorize it in conversation before retrying.";
-	}
-	if (!rationale) return result;
-	return {
-		kind: "denied",
-		assessment: {
-			...result.assessment,
-			outcome: "deny",
-			rationale,
-		},
-	};
-}
 
 const DIRECTORY_SCAN_CACHE_SAFE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 

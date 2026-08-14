@@ -38,6 +38,8 @@ Tests, local configuration, `.pi-subagents`, Git metadata, and development-only 
 
 The first release normally needs an interactive publish because npm trusted publishing cannot be configured for a package that does not exist yet.
 
+Run the following commands from the repository root; workspace-qualified commands target the public Pi package rather than the private workspace driver.
+
 ```bash
 npm login
 npm whoami
@@ -54,7 +56,7 @@ Review the complete file list printed by `npm pack --dry-run`. Check that no cre
 When ready:
 
 ```bash
-npm publish --access public
+npm publish --workspace=pi-approval-guardian --access public
 ```
 
 Complete the npm 2FA prompt when requested. A local interactive publish does not produce npm provenance; configure trusted publishing immediately after the first release so later GitHub-hosted releases receive provenance automatically. Published npm versions are immutable, so do not publish until the tarball, version, Git commit, and README are final.
@@ -81,7 +83,7 @@ Before `1.0.0`, increment the minor version for an intentional compatibility cha
 Prepare the version on a release branch:
 
 ```bash
-npm version patch --no-git-tag-version   # or minor / major
+npm version patch --no-git-tag-version --workspace=pi-approval-guardian   # or minor / major
 npm run check
 npm run package:check
 ```
@@ -91,8 +93,8 @@ Commit the version change, open a pull request, wait for required CI, and merge 
 For prereleases:
 
 ```bash
-npm version prerelease --preid=beta
-npm publish --tag beta --access public
+npm version prerelease --preid=beta --workspace=pi-approval-guardian
+npm publish --workspace=pi-approval-guardian --tag beta --access public
 ```
 
 Do not publish prereleases under `latest`. The tag-triggered GitHub workflow is stable-only and rejects package versions containing a prerelease suffix; use the documented manual dist-tag flow for prereleases.
@@ -158,7 +160,7 @@ Once trusted publishing is proven, configure npm package publishing access to re
 
 - `package.json#keywords` contains `pi-package`;
 - `package.json#pi.extensions` points to `./extensions/index.ts`;
-- `pi -e .` loads the local package successfully;
+- `pi -e packages/pi-approval-guardian` loads the local package successfully from the repository root;
 - the packed file list contains no credentials or local configuration.
 
 After npm publication and registry verification, allow time for the npm search index and gallery catalog to refresh. The package detail route may work before catalog search does. Check both:

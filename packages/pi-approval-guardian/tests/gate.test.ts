@@ -18,7 +18,6 @@ import {
 	MAX_CONSECUTIVE_GUARDIAN_DENIALS_PER_TURN,
 	ReviewBatchTracker,
 	MAX_RECENT_AUTO_REVIEW_DENIALS_PER_TURN,
-	circuitOutcomeForReview,
 	classifyMutationPath,
 	classifyReadPath,
 	directoryMayContainPrivatePath,
@@ -51,34 +50,7 @@ test("allows reset consecutive denials but retains the recent window", () => {
 	assert.equal(AUTO_REVIEW_DENIAL_WINDOW_SIZE, 50);
 });
 
-test("classifies denied, timeout, and failure as adverse circuit outcomes", () => {
-	const assessment = {
-		risk_level: "low" as const,
-		user_authorization: "unknown" as const,
-		outcome: "allow" as const,
-		rationale: "",
-	};
-	assert.equal(
-		circuitOutcomeForReview({ kind: "allowed", assessment }),
-		false,
-	);
-	assert.equal(
-		circuitOutcomeForReview({ kind: "denied", assessment: { ...assessment, outcome: "deny" } }),
-		true,
-	);
-	assert.equal(
-		circuitOutcomeForReview({ kind: "timeout", message: "timeout" }),
-		true,
-	);
-	assert.equal(
-		circuitOutcomeForReview({ kind: "failure", message: "failure" }),
-		true,
-	);
-	assert.equal(
-		circuitOutcomeForReview({ kind: "cancelled", message: "cancelled" }),
-		false,
-	);
-
+test("tracks adverse and successful shared-decision outcomes", () => {
 	const breaker = new DenialCircuitBreaker();
 	assert.equal(breaker.record(true), false);
 	assert.equal(breaker.record(true), false);

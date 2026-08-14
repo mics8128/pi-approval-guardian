@@ -11,10 +11,9 @@ import test from "node:test";
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import approvalGuardian, {
 	actionFromToolCall,
-	enforceActionRequirements,
+	decideGuardianAction,
 	guardianHealth,
-	lockAllowedToolInput,
-	lockReviewedToolInput,
+	normalizePiToolAction,
 	reviewerToolsForAction,
 	runReviewWithFallbackChain,
 	shouldFallbackReview,
@@ -27,6 +26,7 @@ import { DirectoryScanCache } from "../src/directory-scan-cache.ts";
 import { DenialCircuitBreaker, ReviewBatchTracker } from "../src/gate.ts";
 import { buildGuardianTranscript } from "../src/review.ts";
 import { ReviewerSessionController } from "../src/reviewer-session.ts";
+import { lockReviewedToolInput } from "../src/tool-input-lock.ts";
 
 function event(toolName: string, input: Record<string, unknown>): ToolCallEvent {
 	return { toolName, input, toolCallId: "test" } as unknown as ToolCallEvent;
@@ -1056,13 +1056,7 @@ test("locks approved tool arguments against later handlers", () => {
 	}, TypeError);
 });
 
-test("fails closed when an allowed input contains exotic runtime values", () => {
-	const assessment = {
-		risk_level: "low" as const,
-		user_authorization: "unknown" as const,
-		outcome: "allow" as const,
-		rationale: "",
-	};
+test("rejects exotic runtime values before locking tool input", () => {
 	const cyclic: Record<string, unknown> = {};
 	cyclic.self = cyclic;
 	const accessor = Object.defineProperty({}, "secret", {
@@ -1088,12 +1082,6 @@ test("fails closed when an allowed input contains exotic runtime values", () => 
 			exotic,
 		});
 		assert.throws(() => lockReviewedToolInput(guarded), expected);
-		const result = lockAllowedToolInput(guarded, {
-			kind: "allowed",
-			assessment,
-		});
-		assert.equal(result.kind, "failure");
-		if (result.kind === "failure") assert.match(result.message, /could not be locked/);
 	}
 });
 
@@ -1596,37 +1584,11 @@ test("private-data reviews expose no investigation tools", () => {
 	);
 });
 
-test("requires a high-authorization reviewer decision for private reads", () => {
-	const action = {
-		tool: "read",
-		cwd: "/repo/project",
-		payload: { path: "/repo/project/.env", private_data_read: true },
-	};
-	const blocked = enforceActionRequirements(action, {
-		kind: "allowed",
-		assessment: {
-			risk_level: "low",
-			user_authorization: "unknown",
-			outcome: "allow",
-			rationale: "",
-		},
-	});
-	assert.equal(blocked.kind, "denied");
-
-	const allowed = enforceActionRequirements(action, {
-		kind: "allowed",
-		assessment: {
-			risk_level: "high",
-			user_authorization: "high",
-			outcome: "allow",
-			rationale: "Explicitly authorized.",
-		},
-	});
-	assert.equal(allowed.kind, "allowed");
-});
-
-test("fails closed on contradictory high and critical allow decisions", () => {
-	const action = { tool: "bash", cwd: "/repo", payload: { command: "deploy" } };
+test("fails closed on contradictory high and critical allow decisions", async () => {
+	const action = normalizePiToolAction(
+		{ tool: "bash", cwd: "/repo", payload: { command: "deploy" } },
+		{ command: "deploy" },
+	);
 	for (const assessment of [
 		{
 			risk_level: "critical" as const,
@@ -1641,9 +1603,13 @@ test("fails closed on contradictory high and critical allow decisions", () => {
 			rationale: "",
 		},
 	]) {
-		assert.equal(
-			enforceActionRequirements(action, { kind: "allowed", assessment }).kind,
-			"denied",
-		);
+		const decision = await decideGuardianAction(action, {
+			isCircuitOpen: () => false,
+			review: async () => ({ kind: "allowed", assessment }),
+			protectInput: () => undefined,
+			recordCircuitOutcome: () => undefined,
+		});
+		assert.equal(decision.verdict, "block");
+		assert.equal(decision.result.kind, "denied");
 	}
 });

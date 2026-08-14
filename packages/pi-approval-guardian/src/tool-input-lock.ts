@@ -13,22 +13,6 @@ export function lockReviewedToolInput(event: ToolCallEvent): void {
 	});
 }
 
-export function lockAllowedToolInput(
-	event: ToolCallEvent,
-	result: GuardianReviewResult,
-): GuardianReviewResult {
-	if (result.kind !== "allowed") return result;
-	try {
-		lockReviewedToolInput(event);
-		return result;
-	} catch (error) {
-		return {
-			kind: "failure",
-			message: `Approved tool input could not be locked safely: ${error instanceof Error ? error.message : String(error)}`,
-		};
-	}
-}
-
 function deepFreezeJsonLike(value: unknown): void {
 	assertJsonLike(value);
 	freezeJsonLike(value);

@@ -13,13 +13,17 @@ import { DirectoryScanCache } from "../src/directory-scan-cache.ts";
 import {
 	DenialCircuitBreaker,
 	ReviewBatchTracker,
-	circuitOutcomeForReview,
 	type GuardianReviewResult,
 } from "../src/gate.ts";
 import {
 	buildGuardianSystemPrompt,
 	buildPrivateDataReviewSystemPrompt,
 } from "../src/policy.ts";
+import {
+	decideGuardianAction,
+	guardianInputIdentity,
+	normalizePiToolAction,
+} from "../src/normalized-decision.ts";
 import {
 	formatReviewResult,
 	rejectionReason,
@@ -41,12 +45,22 @@ import {
 import { ReviewerSessionController } from "../src/reviewer-session.ts";
 import {
 	actionFromToolCall,
-	enforceActionRequirements,
 	reviewerToolsForAction,
 	shouldInvalidateDirectoryScanCache,
 	toolCallBatchInfo,
 } from "../src/tool-actions.ts";
-import { lockAllowedToolInput } from "../src/tool-input-lock.ts";
+import { lockReviewedToolInput } from "../src/tool-input-lock.ts";
+import { snapshotGuardianJson } from "../src/shared-decision.ts";
+
+export {
+	decideGuardianAction,
+	guardianInputIdentity,
+	normalizePiToolAction,
+	type GuardianDecisionAudit,
+	type GuardianDecisionServices,
+	type NormalizedGuardianAction,
+	type NormalizedGuardianDecision,
+} from "../src/normalized-decision.ts";
 
 export {
 	guardianHealth,
@@ -56,15 +70,10 @@ export {
 } from "../src/reviewer-channels.ts";
 export {
 	actionFromToolCall,
-	enforceActionRequirements,
 	reviewerToolsForAction,
 	shouldInvalidateDirectoryScanCache,
 	toolCallBatchInfo,
 } from "../src/tool-actions.ts";
-export {
-	lockAllowedToolInput,
-	lockReviewedToolInput,
-} from "../src/tool-input-lock.ts";
 
 export interface ApprovalGuardianOptions {
 	directoryScanCache?: DirectoryScanCache;
@@ -302,6 +311,14 @@ export default function approvalGuardian(
 			ctx.sessionManager.getBranch(),
 		);
 		try {
+			try {
+				snapshotGuardianJson(event.input);
+			} catch {
+				return {
+					block: true,
+					reason: "Approval Guardian blocked malformed or unsafe tool input before classification.",
+				};
+			}
 			const config = loadGuardianConfig({
 				cwd: ctx.cwd,
 				projectTrusted: ctx.isProjectTrusted(),
@@ -315,24 +332,22 @@ export default function approvalGuardian(
 			);
 			if (!action) return;
 
-			if (circuitBreaker.isOpen()) {
-				const result: GuardianReviewResult = {
-					kind: "circuit-open",
-					message: "Repeated adverse Guardian outcomes reached the per-turn limit.",
-				};
-				ctx.ui.notify(formatReviewResult(result, action), "error");
-				return { block: true, reason: rejectionReason(result) };
-			}
-
-			const reviewed = await reviewAction(action, config, ctx);
-			const result = lockAllowedToolInput(
-				event,
-				enforceActionRequirements(action, reviewed),
-			);
-			const circuitOutcome = circuitOutcomeForReview(result);
-			if (circuitOutcome !== undefined) {
-				reviewBatches.record(batch.id, circuitOutcome);
-			}
+			const normalizedAction = normalizePiToolAction(action, event.input);
+			const decision = await decideGuardianAction(normalizedAction, {
+				isCircuitOpen: () => circuitBreaker.isOpen(),
+				review: (candidate) => reviewAction(candidate, config, ctx),
+				protectInput: (expectedInputIdentity) => {
+					if (guardianInputIdentity(event.input) !== expectedInputIdentity) {
+						throw new Error(
+							"Tool input changed after Guardian review began.",
+						);
+					}
+					lockReviewedToolInput(event);
+				},
+				recordCircuitOutcome: (adverse) =>
+					reviewBatches.record(batch.id, adverse),
+			});
+			const result: GuardianReviewResult = decision.result;
 			if (result.kind === "allowed") {
 				ctx.ui.notify(formatReviewResult(result, action), "info");
 				return;

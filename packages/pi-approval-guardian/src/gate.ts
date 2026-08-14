@@ -47,19 +47,6 @@ export type GuardianReviewResult =
 	| { kind: "cancelled"; message: string }
 	| { kind: "circuit-open"; message: string };
 
-export function circuitOutcomeForReview(
-	result: GuardianReviewResult,
-): boolean | undefined {
-	if (result.kind === "allowed" || result.kind === "cancelled") return false;
-	if (
-		result.kind === "denied" ||
-		result.kind === "timeout" ||
-		result.kind === "failure"
-	) {
-		return true;
-	}
-	return undefined;
-}
 
 // Small state holder; the structural rule misclassifies its method span as a large class.
 // pi-lens-ignore: large-class

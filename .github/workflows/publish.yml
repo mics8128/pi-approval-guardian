@@ -19,7 +19,7 @@ jobs:
 
       - name: Verify stable tag matches package version
         run: |
-          package_version="$(node -p "require('./package.json').version")"
+          package_version="$(node -p "require('./packages/pi-approval-guardian/package.json').version")"
           test "${GITHUB_REF_NAME}" = "v${package_version}"
           if [[ "${package_version}" == *-* ]]; then
             echo "::error::Prerelease versions must use the documented manual dist-tag flow and cannot run the stable publish workflow."
@@ -43,7 +43,7 @@ jobs:
         run: npm run check
 
       - name: Preview package contents
-        run: npm pack --dry-run
+        run: npm run package:check
 
   publish:
     needs: validate
@@ -75,8 +75,8 @@ jobs:
         id: registry
         shell: bash
         run: |
-          package_name="$(node -p "require('./package.json').name")"
-          package_version="$(node -p "require('./package.json').version")"
+          package_name="$(node -p "require('./packages/pi-approval-guardian/package.json').name")"
+          package_version="$(node -p "require('./packages/pi-approval-guardian/package.json').version")"
           if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -85,4 +85,4 @@ jobs:
 
       - name: Publish with npm trusted publishing
         if: steps.registry.outputs.exists != 'true'
-        run: npm publish --ignore-scripts
+        run: npm publish --ignore-scripts --workspace=pi-approval-guardian
